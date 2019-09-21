@@ -1,0 +1,16 @@
+### some useful commands
+# 1. windows carriage returns for print(python) is different from linux
+# fix with or regex replace in editplus
+ sed $'s/\r$//' ./install.sh > ./install.Unix.sh
+
+# 2. move file from text file
+cat /tmp/list.txt | xargs mv -t /app/dest/
+# or 
+xargs mv -t /app/dest/ < /tmp/list.txt
+### gnu parallel
+find /data/yue/joanne/videos -name *.mov | wc
+# this is case-sensitive
+find /data/yue/joanne/videos -iname *.mov | wc
+# now case-insensitive
+# together with gnu parallel
+find /data/yue/joanne/videos -iname *.MOV | parallel python joanne_new.py

@@ -1,9 +1,8 @@
-import cv2, json, os, subprocess
+import cv2, json, os, subprocess, random, glob, sys
 import numpy as np
+import pandas as pd
 from matplotlib import pyplot as plt
 from sklearn.cluster import KMeans
-import random
-import glob
 
 RADIUS_INNER_LOWER=150
 RADIUS_INNER_UPPER=330
@@ -11,22 +10,31 @@ RADIUS_LENS_LOWER=335
 RADIUS_LENS_UPPER=500
 RADIUS_INNER_LOWER_NEW=150  # new videos seem to have different size ranges
 RADIUS_INNER_UPPER_NEW=280
-RADIUS_LENS_LOWER_NEW=325   # limit for new videos - by manualy observing smallest lens radii (TIME CONSUMING!)
+RADIUS_LENS_LOWER_NEW=310   # limit for new videos - by manualy observing smallest lens radii (TIME CONSUMING!)
 RADIUS_LENS_UPPER_NEW=390   # tighter upper limit for new videos
 MAX_AREA_LENS = np.pi*(RADIUS_LENS_UPPER**2)    # enclosing circle
 MIN_AREA_LENS = (RADIUS_LENS_UPPER**2)      # smallest box for contour area
 MAX_AREA_INNER = np.pi*(RADIUS_INNER_UPPER**2)  # enclosing circle
 MIN_AREA_INNER = (RADIUS_INNER_LOWER**2)    # smallest box for contour area
+MIN_AREA_INNER = (100**2)    # smallest box for contour area
 PERC_THRESHOLD_LENS = 0.025     # about 10pixels for typical 400 pixel radius lens
 PERC_THRESHOLD_INNER = 0.05     # about 11pixels for typical 220 pixel radius inner
+DEFAULT_CIRCLE = [0, 0, 0]
+KMEANS_SCALE = 10
+LABEL_MAP = {'goldman':'Goldmann', 'iCare_pre':'iCare', 'iCare_post':'iCare (Post)', 'tonopen_pre':'Tonopen_Upright',
+             'tonopen_supine':'Tonopen_Supine', 'pneumo_upright':'Pneumo_Upright', 'pneumo_supine':'Pneumo_Supine',
+             'pneumo_avg':'Pneumo Avg (Supine, Upright)'}
+MARKER_MAP = {'goldman':'*', 'iCare_pre':'o', 'iCare_post':'v', 'tonopen_pre':'<',
+             'tonopen_supine':'>', 'pneumo_upright':'P', 'pneumo_supine':'s'}
 
 from sys import platform
 if platform == "linux" or platform == "linux2":
     plt.switch_backend('agg')
     prefix = "/data/yue/joanne"
+    file_sep = '/'
 else:
-    # plt.switch_backend('agg')
     prefix = "Z:\yue\joanne"
+    file_sep = '\\'
 
 
 # understand gaussian smoothing - used in hough transform
@@ -55,8 +63,6 @@ def hough_transform(cimg, save_name=None):
     if circles is not None:
         fig = plt.figure(100)
         plt.clf()
-        # plt.subplot(1, 2, 1)
-        # plt.imshow(c_original)
         ax = fig.add_subplot(1, 2, 1)
         ax.imshow(c_original)
 
@@ -65,7 +71,6 @@ def hough_transform(cimg, save_name=None):
         ax2.imshow(gray_img)
         for i in circles[0, :]:
             c1 = plt.Circle((i[0], i[1]), i[2], color=(0, 1, 0), fill=False)
-            # c2 = plt.Circle((i[0], i[1]), 2, color=(0, 0, 1))
             ax2.add_artist(c1)
             ax2.scatter(x=i[0], y=i[1], c='red', s=2)
 
@@ -91,10 +96,10 @@ def threshold_ellipse(cimg, save_name, mode='pig', visualise=True):
     # outer circle is more regular - use HoughCircles
     max_circle = get_outer_circle(img, param1=param1, param2=param2, visualise=visualise)
     if 1:
-        if np.all(inner_circle != [0, 0, 0]):
+        if np.all(inner_circle != DEFAULT_CIRCLE):
             cv2.circle(cimg, (inner_circle[0], inner_circle[1]), inner_circle[2], (0, 0, 255), 2)   # BGR
 
-        if np.all(max_circle != [0, 0, 0]):
+        if np.all(max_circle != DEFAULT_CIRCLE):
             cv2.circle(cimg, (max_circle[0], max_circle[1]), max_circle[2], (0, 255, 255), 2)
         cv2.imwrite(save_name, cimg)
     return {'inner_circle':inner_circle, 'outer_circle':max_circle}
@@ -106,7 +111,7 @@ def get_outer_circle(img, param1=100, param2=30, min_radius=100, max_radius=500,
     circles = cv2.HoughCircles(gray_img, cv2.HOUGH_GRADIENT, dp=1, minDist=10, param1=param1, param2=param2, minRadius=min_radius, maxRadius=max_radius)
 
     max_circle_r = 0
-    max_circle = [0, 0, 0]  # x,y,r
+    max_circle = DEFAULT_CIRCLE  # x,y,r
     if circles is not None:
         for circle in circles[0, :]:
             if circle[2] > max_circle_r:
@@ -188,7 +193,7 @@ def get_circle(img, thresh=25, maxval=35, min_area=MIN_AREA_INNER, max_area=None
         # #     plt.clf()
         # #     plt.imshow(img_cp2)  # ellipses
     else:
-        inner_circle = [0, 0, 0]
+        inner_circle = DEFAULT_CIRCLE
         ellipse = tuple([(0, 0), (0, 0), 0])
 
     legit_circles = []
@@ -198,7 +203,7 @@ def get_circle(img, thresh=25, maxval=35, min_area=MIN_AREA_INNER, max_area=None
         # img_cp2 = img.copy()
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < MIN_AREA_INNER or area > max_area: # only compute for reasonable sized contours for speed
+            if area < MIN_AREA_INNER or area > max_area:  # only compute for reasonable sized contours for speed
                 continue
 
             # min enclosing circle
@@ -223,6 +228,75 @@ def get_circle(img, thresh=25, maxval=35, min_area=MIN_AREA_INNER, max_area=None
         # visualise_circle(img.copy(), inner_circle, )    # need img.copy() instead of img as that may have been corrupted from transformations
         visualise_circle(img.copy(), inner_circle, legit_circles)  # inner_circle is max_circle
     return inner_circle, None, legit_circles, legit_contours
+
+
+def get_circle_new(img, img_preds, clt, clust_idx, max_area=None, visualise=False, do_morph=False):
+    k_clusters = list(clt.cluster_centers_.flatten())
+    k_clusters_sorted = sorted(k_clusters)  # sorted in ascending intensity
+    real_idx = k_clusters.index(k_clusters_sorted[clust_idx])  # maintain order of finding circles as in get_circle()
+
+    # blur = cv2.bilateralFilter(img_preds, 4, 75, 75)
+    thresh_img = threshhold_img(img_preds, real_idx, reverse=False)
+    if visualise:
+        # plt.figure(10000)
+        # plt.imshow(img)
+        # plt.title('input img')
+        plt.figure(10001)
+        plt.imshow(thresh_img)
+        plt.title('thresh img')
+        thresh_img2 = threshhold_img(img_preds, real_idx, reverse=True)
+        plt.figure(10002)
+        plt.imshow(thresh_img2)
+        plt.title('thresh img reverse')
+
+    if max_area is None:
+        max_area = np.prod(img.shape) / 2
+
+    thresh_img = thresh_img.astype(np.uint8)
+    if do_morph:
+        kernel = np.ones((3, 3), np.uint8)
+        thresh_img = cv2.morphologyEx(thresh_img, cv2.MORPH_OPEN, kernel, iterations=3)
+    im2, contours, hierarchy = cv2.findContours(thresh_img, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    legit_circles, legit_contours = get_legit_circles(img, contours, max_area=max_area, min_area=MIN_AREA_INNER)
+
+    # im2_rev, contours_rev, hierarchy_rev = cv2.findContours(thresh_img2.astype(np.uint8), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    # legit_circles2, legit_contours2 = get_legit_circles(img, contours_rev, max_area=max_area, min_area=MIN_AREA_INNER)
+
+    if visualise:
+        visualise_circle(img.copy(), DEFAULT_CIRCLE, legit_circles)  # inner_circle is max_circle
+    return legit_circles, legit_contours
+
+
+def get_legit_circles(img, contours, max_area=MAX_AREA_INNER, min_area=MIN_AREA_INNER, visualise=False):
+    legit_circles = []
+    legit_contours = []
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < min_area or area > max_area:  # only compute for reasonable sized contours for speed
+            continue
+
+        # min enclosing circle
+        (x, y), radius = cv2.minEnclosingCircle(cnt)
+        center = (int(x), int(y))
+        radius = int(radius)
+        inner_circle2 = [int(x), int(y), radius]
+        legit_circles.append(inner_circle2)
+        legit_contours.append(cnt)
+
+    if visualise:
+        visualise_circle(img.copy(), DEFAULT_CIRCLE, legit_circles)
+    return legit_circles, legit_contours
+
+
+def threshhold_img(img_preds, real_idx, reverse=False):
+    thresh_img = img_preds.copy()
+    if reverse:
+        thresh_img[img_preds == real_idx] = 255
+        thresh_img[img_preds != real_idx] = 0
+    else:
+        thresh_img[img_preds != real_idx] = 255     # order matters since real_idx can be 0
+        thresh_img[img_preds == real_idx] = 0
+    return thresh_img
 
 
 def area_ellipse(ellipse):
@@ -286,8 +360,8 @@ def kmeans_helper_2D(img, num_clusters=5, down_sample_scale=1, visualise=True):
 
     if down_sample_scale > 1:   # try kmeans on downsampled img for speed
         new_dim = tuple([int(x/down_sample_scale) for x in img.shape])[::-1]     # need (cols, rows) instead of (rows, cols)
-        target = cv2.resize(img, dsize=new_dim, interpolation=cv2.INTER_LINEAR)    # bilinear interpolation, which is default
-        # target = cv2.resize(img, dsize=new_dim, interpolation=cv2.INTER_CUBIC)
+        # target = cv2.resize(img, dsize=new_dim, interpolation=cv2.INTER_LINEAR)    # bilinear interpolation, which is default
+        target = cv2.resize(img, dsize=new_dim, interpolation=cv2.INTER_CUBIC)
 
     clt.fit(target.reshape(np.prod(target.shape), 1))
     if visualise:
@@ -357,7 +431,7 @@ def my_kmeans_optimal(img, num_clusters=[3, 5, 7], visualise=False):
     return max_gap_index, clts, inertias, diffs
 
 
-def visualise_kmeans(img, clt, scale_factor=5):
+def visualise_kmeans(img, clt, scale_factor=KMEANS_SCALE):
     k_clusters = sorted(get_kmean_boundaries(clt))
     # k_clusters = sorted(clt.cluster_centers_.flatten())
     num_clusters = len(k_clusters)
@@ -384,13 +458,14 @@ def visualise_kmeans(img, clt, scale_factor=5):
     #     plt.title(title_text)
 
     plt.figure(10)
-    plt.imshow(np.reshape(clt.labels_*40, [int(x/scale_factor) for x in img.shape]))
+    plt.imshow(np.reshape(clt.labels_*30, [int(x/scale_factor) for x in img.shape]))
     plt.title('kmeans with k={} on downsampled scale'.format(clt.n_clusters))
-    # plt.figure(11)
-    # temp = clt.predict(np.reshape(img, (np.prod(img.shape),1)))
-    # plt.imshow(np.reshape(temp * 40, img.shape))
-    # plt.title('kmeans with k={} on original scale'.format(clt.n_clusters))
-    return
+    plt.figure(11)
+    temp = clt.predict(np.reshape(img, (np.prod(img.shape),1)))
+    temp2 = np.reshape(temp * 30, img.shape)
+    plt.imshow(temp2)
+    plt.title('kmeans with k={} on original scale'.format(clt.n_clusters))
+    return plt
 
 
 def get_kmean_boundaries(clt, do_simple=True, include_zero=False, my_range=np.arange(0, 255, 0.25)):
@@ -415,7 +490,7 @@ def get_kmean_boundaries(clt, do_simple=True, include_zero=False, my_range=np.ar
     return sorted(cluster_boundaries)
 
 
-def kmeans_pred_simple(img, clt, scale_factor=40):  # 40 allows 5 clusters
+def kmeans_pred_simple(img, clt, scale_factor=KMEANS_SCALE):  # 40 allows 5 clusters
     num_clusters = clt.n_clusters
     temp = img.copy()
     k_clusters = sorted(get_kmean_boundaries(clt))
@@ -445,7 +520,7 @@ def load_video(video_path, visualise=False):
             plt.imshow(frame)
 
     cap.release()
-    cv2.destroyAllWindows()
+    # cv2.destroyAllWindows()
     return frames
 
 
@@ -499,25 +574,34 @@ def process_video_folder(folder, mode='human', visualise=False):
 
 
 # movie of predictions based on predicted pngs
-def make_movie(image_folder):
-    video_name = '{}/preds_video.avi'.format(image_folder)
+def make_movie(image_folder, video_names=['iP058_OD', 'iP058_OS', 'iP061_OD', 'iP061_OS', 'iP062_OD', 'iP065_OS', 'iP066_OS', 'iP069_OD', 'iP071_OD', 'iP071_OS']):
+    fourcc = cv2.VideoWriter_fourcc('H', '2', '6', '4')
+    fourcc = cv2.VideoWriter_fourcc(*'MPV4')
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
 
-    images = [img for img in os.listdir(os.path.join(image_folder)) if img.endswith(".png")]
-    # images = sorted(images, key=lambda img: int(img.split('_')[-1].replace('.png', '').replace('i', '')))
-    images = sorted(images, key=lambda img: int(img.split('_')[-1].replace('.png', '').replace('frame', '')))
-    frame = cv2.imread(os.path.join(image_folder, images[0]))
-    height, width, layers = frame.shape
+    for video_name in video_names:
+        video_out = '{}/preds_{}_new.avi'.format(image_folder, video_name)
+        images = [img for img in os.listdir(os.path.join(image_folder)) if img.endswith(".png") and video_name in img]
+        # images = sorted(images, key=lambda img: int(img.split('_')[-1].replace('.png', '').replace('i', '')))
+        images = sorted(images, key=lambda img: int(img.split('_')[-1].replace('.png', '').replace('frame', '')))
+        frame = cv2.imread(os.path.join(image_folder, images[0]))
+        height, width, layers = frame.shape
+        height_re, width_re = int(height/1), int(width/1)
 
-    video = cv2.VideoWriter(video_name, -1, 2, (width, height))
-    for image in images:
-        # video_base = int(image.split('_')[-1].replace('.png', ''))
-        # if video_base>900 and video_base<1000 and video_base%2==0:
-        #     video.write(cv2.imread(os.path.join(image_folder, image)))
-        # video_base = int(image.split('_')[-1].replace('.png', '').replace('frame', ''))
-        video.write(cv2.imread(os.path.join(image_folder, image)))
+        num_frames_per_sec = 25
+        video = cv2.VideoWriter(video_out, fourcc, num_frames_per_sec, (width_re, height_re))
+        for image in images:
+            # video_base = int(image.split('_')[-1].replace('.png', ''))
+            # if video_base>900 and video_base<1000 and video_base%2==0:
+            #     video.write(cv2.imread(os.path.join(image_folder, image)))
+            # video_base = int(image.split('_')[-1].replace('.png', '').replace('frame', ''))
+            cur_img = cv2.imread(os.path.join(image_folder, image))
+            resized_img = cur_img
+            # resized_img = cv2.resize(cur_img, (width_re, height_re))
+            video.write(resized_img)
 
-    cv2.destroyAllWindows()
-    video.release()
+        # cv2.destroyAllWindows()
+        video.release()
     return
 
 
@@ -529,34 +613,34 @@ def myround(x, base=5, do_ceiling=True):
         return int(base * round(float(x)/base))
 
 
-def visualise_circle(img, circle, all_circles=[]):
-    img_cp = np.copy(img)
-    plt.figure(0)
-    plt.clf()
-    plt.imshow(img)
-    plt.title('original image')
+def visualise_circle(img, circle, all_circles=[], circle_color=(255, 255, 255)):
+    if len(img.shape)==2:
+        img_cp = np.repeat(np.expand_dims(img, axis=2), 3, axis=2)  # to better see color
+    else:
+        img_cp = np.copy(img)
+    img_all = img_cp.copy()
+    if "linux" not in platform:
+        plt.figure(0), plt.clf(), plt.imshow(img), plt.title('original image in visualise_circle')
 
-    plt.figure(100)
-    plt.clf()
     color_green = (0, 255, 0)
     color_red = (0, 0, 255)
-    circle_color = (255, 255, 255)
     cv2.circle(img_cp, (circle[0], circle[1]), circle[2], circle_color, 2)  # draw the circle
-    # cv2.circle(img_cp, (circle[0], circle[1]), 2, color_red, 3)  # draw the center of the circle
-    plt.imshow(img_cp)
-    plt.title('image copy with circle')
+    cv2.circle(img_cp, (circle[0], circle[1]), 5, color_red, -1)  # draw filled center of the circle
+
+    if "linux" not in platform:
+        plt.figure(100), plt.clf(), plt.imshow(img_cp), plt.title('image copy with circle in visualise_circle')
     # cv2.imshow("Keypoints", img)
 
     if len(all_circles) > 0:
-        img_all = img.copy()
-        for circle in all_circles:
-            img_all = cv2.circle(img_all, (circle[0], circle[1]), circle[2], circle_color, 1)  # draw the circle
-            # img_all = cv2.circle(img_all, (circle[0], circle[1]), 2, (0, 0, 255), 2)  # draw the center of the circle
-        plt.figure(101)
-        plt.clf()
-        plt.imshow(img_all)
-        plt.title('image copy with all circles')
-    return img_cp
+        rand_color = np.random.rand(len(all_circles), 3)*255
+        for idx, circle in enumerate(all_circles):
+            img_all = cv2.circle(img_all, (circle[0], circle[1]), circle[2], rand_color[idx], 3)  # draw the circle
+            img_all = cv2.circle(img_all, (circle[0], circle[1]), 5, rand_color[idx], -1)  # draw filled center of the circle
+        if "linux" not in platform:
+            plt.figure(101), plt.clf(), plt.imshow(img_all), plt.title('image copy with all circles in visualise_circle')
+    else:
+        img_all = img_cp
+    return img_all
 
 
 def is_approp_size(img, max_circle, size_lim=[RADIUS_LENS_LOWER, RADIUS_LENS_UPPER], visualise=False):
@@ -564,8 +648,9 @@ def is_approp_size(img, max_circle, size_lim=[RADIUS_LENS_LOWER, RADIUS_LENS_UPP
     c_radius = max_circle[2]
     if (c_radius > size_lim[0]) and (c_radius < size_lim[1]):   # reasonable radius - mostly around 310
         found_circle = True
-    elif c_radius > 0:    # not empty, but (likely) too small
-        print('radius', c_radius)
+    elif c_radius > 0:
+        1
+        # print('not empty, but (likely) too small;\t', 'radius=', c_radius)
 
     if visualise:
         visualise_circle(img.copy(), max_circle)
@@ -661,8 +746,8 @@ def intersection_area(d, R, r):
     return ( r2 * alpha + R2 * beta - 0.5 * (r2 * np.sin(2*alpha) + R2 * np.sin(2*beta)) )
 
 
-# this will break incomplete inner circles!
-def non_cutting_circle(img, clt, circle, cross_thresh=0.05, scale_factor=40, visualise=False):
+# DOESN'T work - this will break incomplete inner circles!
+def non_cutting_circle(img, clt, circle, cross_thresh=0.05, scale_factor=KMEANS_SCALE, visualise=False):
     img_shape = img.shape
     points = get_circle_points(circle, img_shape)   # circle border - internal might be multiple clusters especially for lens circle
     cluster_mask = kmeans_pred_simple(img, clt, scale_factor=scale_factor)
@@ -692,35 +777,20 @@ def non_cutting_circle(img, clt, circle, cross_thresh=0.05, scale_factor=40, vis
 
 def find_circles(img, num_clusters=4, get_all=False, lens_size_lim=[RADIUS_LENS_LOWER, RADIUS_LENS_UPPER], inner_size_lim=[RADIUS_INNER_LOWER, RADIUS_INNER_UPPER], visualise=False):
     # clt = kmeans_helper_2D(img, num_clusters=num_clusters, visualise=visualise)
-    clt = kmeans_helper_2D(img, num_clusters=num_clusters, down_sample_scale=5, visualise=visualise)   # for speed
+    clt = kmeans_helper_2D(img, num_clusters=num_clusters, down_sample_scale=KMEANS_SCALE, visualise=visualise)   # for speed
     if visualise:
         visualise_kmeans(img, clt)
+    img_preds = clt.predict(np.reshape(img, (np.prod(img.shape), 1)))
+    img_preds = np.reshape(img_preds, img.shape)
     # k_clusters = sorted(clt.cluster_centers_.flatten())   # sorted in ascending intensity
     k_clusters = get_kmean_boundaries(clt)
 
     circles = []
-    for idx in range(1, len(k_clusters)):
-        max_c, ellipse, legit_circles, legit_contours = get_circle(img, k_clusters[idx-1], k_clusters[idx], get_all=get_all, visualise=visualise)
-
+    for idx in range(0, num_clusters):
+        # max_c, ellipse, legit_circles, legit_contours = get_circle(img, k_clusters[idx-1], k_clusters[idx], get_all=get_all, visualise=visualise)
+        legit_circles, legit_contours = get_circle_new(img, img_preds, clt, idx, visualise=visualise, do_morph=False)
         for c in legit_circles:
             circles.append(c)
-            # if non_cutting_circle(img, clt, c):   # non-cutting doesnt work!
-            #     circles.append(c)
-        # if visualise:
-        #     plt.imshow(img)
-        #     for contour in contours:
-        #         contour = np.reshape(contour, (contour.shape[0], contour.shape[-1]))
-        #         plt.scatter(x=contour[:, 0], y=contour[:, 1], c='yellow')
-
-        # # np.logical_and(img > k_clusters[idx - 1], img < k_clusters[idx]).nonzero()
-        # cur_cluster = np.argwhere(np.logical_and(img>k_clusters[idx-1], img<k_clusters[idx]))
-        # cur_cluster2 = cur_cluster  # flip x, y for cv2
-        # cur_cluster2[:, 0] = cur_cluster[:, 1]
-        # cur_cluster2[:, 1] = cur_cluster[:, 0]
-        # plt.imshow(img)
-        # plt.scatter(x=cur_cluster[:,1], y=cur_cluster[:,0], c='yellow')
-        # mask_circle = cv2.minEnclosingCircle(cur_cluster2.reshape(cur_cluster2.shape[0], 1, cur_cluster2.shape[1]))    # too big!
-        # visualise_circle(img, mask_circle)
 
     # check for found sizes in reverse intensity order
     lens_circle, found_lens_circle, inner_circle, found_inner_circle = \
@@ -730,33 +800,19 @@ def find_circles(img, num_clusters=4, get_all=False, lens_size_lim=[RADIUS_LENS_
 
 def process_circles(circles, img, lens_size_lim=[RADIUS_LENS_LOWER, RADIUS_LENS_UPPER],
                     inner_size_lim=[RADIUS_INNER_LOWER, RADIUS_INNER_UPPER], visualise=False):
-    found_lens_circle = False
-    found_inner_circle = False
-    lens_circle = [0, 0, 0]  # default
-    inner_circle = [0, 0, 0]  # default
-
+    lens_circle, found_lens_circle = DEFAULT_CIRCLE, False
     for c in circles:
-        if not found_lens_circle:   # not found - then check if current c is appropriate lens circle
+        if not found_lens_circle:
             found_lens_circle = is_approp_size(img, c, size_lim=lens_size_lim, visualise=visualise) and is_circle_central(c)
-            if found_lens_circle:
-                lens_circle = c
+            lens_circle = c
+    inner_circle = find_inner_donut(circles, lens_circle, overlap_ratio=1)
 
-        # FIXME - should find smallest inner_circle (sometimes multiple within size range)
-        # if not found_inner_circle:
-        local_found_inner_circle = is_approp_size(img, c, size_lim=inner_size_lim, visualise=visualise) and is_circle_central(c)
-        if local_found_inner_circle:
-            found_inner_circle = found_inner_circle or local_found_inner_circle
-            if inner_circle!= [0, 0, 0]:  # not default
-                r = c[2]
-                R = inner_circle[2]
-                if r<R:     # only if enclosed - this would work if first inner (1st kmeans cluster) is representative
-                    d = np.linalg.norm(np.array(inner_circle[:2]) - np.array(c[:2]))
-                    overlap_area = intersection_area(d, R, r)
-                    if overlap_area/area_circle(inner_circle)>.9:
-                        inner_circle = c    # smaller circle
-            else:
-                inner_circle = c
+    # check inner circle size limits - this is highly variable!
+    found_inner_circle = is_approp_size(img, inner_circle, size_lim=inner_size_lim, visualise=visualise) and is_circle_central(inner_circle)
 
+    if visualise:
+        visualise_circle(cv2.cvtColor(img, cv2.COLOR_GRAY2BGR), inner_circle, [inner_circle, lens_circle], circle_color=(255, 0, 0))
+        # visualise_circle(cv2.cvtColor(img, cv2.COLOR_GRAY2BGR), inner_circle, circles, circle_color=(255, 0, 0))
     return lens_circle, found_lens_circle, inner_circle, found_inner_circle
 
 
@@ -796,10 +852,12 @@ def predict_video_frames(img_names, imgs, channel=-1, num_clusters=4, save_kmean
     return
 
 
-def save_circles(save_path, text_path, img_name, frame, found_lens_circle, lens_circle, inner_circle, found_inner_circle):
-    img_cp = visualise_circle(frame, lens_circle)
-    img_cp = visualise_circle(img_cp, inner_circle)
-    cv2.imwrite(save_path, img_cp)
+def save_circles(save_path, text_path, img_name, frame, found_lens_circle, lens_circle, inner_circle,
+                 found_inner_circle):
+    # # FIXME - do not save image for now
+    # img_cp = visualise_circle(frame, lens_circle)
+    # img_cp = visualise_circle(img_cp, inner_circle)
+    # cv2.imwrite(save_path, img_cp)
     write_circle(img_name, text_path, lens_circle, inner_circle, found_lens_circle, found_inner_circle)
     return
 
@@ -1398,12 +1456,12 @@ def get_ground_truth_circles(seg_data, fnames, missed_lens_cols = [0, 2, 4], mis
             if find_type=='inner':   # missing data - default to nan
                 inner_data = [[float('nan'), float('nan'), float('nan')]]
             else:
-                inner_data = [[0, 0, 0]]    # default
+                inner_data = [DEFAULT_CIRCLE]    # default
         if len(lens_data)==0:
             if find_type=='lens':   # missing data - default to nan
                 lens_data = [[float('nan'), float('nan'), float('nan')]]
             else:
-                lens_data = [[0, 0, 0]]    # default
+                lens_data = [DEFAULT_CIRCLE]    # default
 
         # avg radii, avg coordinates - basically finding weighted mean of polygon denoted by coordinates!
         true_avg_dict[fname] = {'lens_data':list(np.mean(np.array(lens_data), axis=0)),
@@ -1570,96 +1628,614 @@ def print_diffs(diff_list, true_inner_dict, true_lens_dict, comp_folder):
     return
 
 
-# TODO - change to read from json file
-def visualise_iop_from_json(folder='joanne_seg_manual', json_path=os.path.join(prefix, 'true_avg_circles.json')):
-    fin = open(json_path).read()
-    true_dict = json.loads(fin)
+def plot_ci_manual(t, s_err, n, x, x2, y2, ax=None):
+    """Return an axes of confidence bands using a simple approach.
 
-    img_names = [x.replace('.png', '') for x in os.listdir(os.path.join(prefix, folder)) if '.png' in x]
-    video_dict = {}
-    for idx, img_name in enumerate(img_names):
-        img_toks = img_name.split('_')
-        video_name = '_'.join(img_toks[:2])
-        frame_num = int(img_toks[2].replace('frame', '').replace('.png', ''))
+    Notes
+    -----
+    .. math:: \left| \: \hat{\mu}_{y|x0} - \mu_{y|x0} \: \right| \; \leq \; T_{n-2}^{.975} \; \hat{\sigma} \; \sqrt{\frac{1}{n}+\frac{(x_0-\bar{x})^2}{\sum_{i=1}^n{(x_i-\bar{x})^2}}}
+    .. math:: \hat{\sigma} = \sqrt{\sum_{i=1}^n{\frac{(y_i-\hat{y})^2}{n-2}}}
 
-        if img_name not in true_dict:
-            continue
-        else:  # has truth
-            img_data = true_dict[img_name]
-            img_lens_circle = img_data['lens_data']
-            img_inner_circle = img_data['inner_data']
-            if (not np.any(np.isnan(img_inner_circle)) and img_inner_circle!=[0, 0, 0]) and \
-                    (not np.any(np.isnan(img_lens_circle)) and img_lens_circle!=[0, 0, 0]):  # real circles
-                iop = calc_iop_from_circles(img_lens_circle, img_inner_circle)
-            else:
-                continue
+    References
+    ----------
+    .. [1] M. Duarte.  "Curve fitting," Jupyter Notebook.
+       http://nbviewer.ipython.org/github/demotu/BMC/blob/master/notebooks/CurveFitting.ipynb
 
-        if video_name not in video_dict:
-            video_dict[video_name] = [[frame_num, iop, img_lens_circle[-1], img_inner_circle[-1]]]
+    """
+    if ax is None:
+        ax = plt.gca()
+
+    ci = t * s_err * np.sqrt(1/n + (x2 - np.mean(x))**2 / np.sum((x - np.mean(x))**2))
+    # ci = t * s_err
+    ax.fill_between(x2, y2 + ci, y2 - ci, color="#b9cfe7", edgecolor="")
+
+    return ax
+
+
+# bland-altman vs various other comp_method
+def make_iop_bland_altman(data_names, measured_pressure_dict, iop_data, comp_method='goldman', save_folder=None, supine_bias=4.1):
+    plt.rcParams["font.weight"] = "bold"
+    plt.rcParams["axes.labelweight"] = "bold"
+    fsize=28
+
+    # scatter of median vs goldman
+    plt.figure(100)
+    plt.clf()
+    # ax = plt.axes()
+    # ax.set_aspect(aspect=1)
+    plt.gca().set_aspect('equal', adjustable='box')
+    iop_comp = []
+    for idx, data_name in enumerate(data_names):
+        cur_iop_data = iop_data[idx]
+        cur_perc = np.percentile(cur_iop_data, q=[25, 50, 75], interpolation='nearest')
+        if comp_method=='pneumo_avg':
+            comp_iop1 = measured_pressure_dict[data_name]['pneumo_supine'] if data_name in measured_pressure_dict else 0
+            comp_iop2 = measured_pressure_dict[data_name]['pneumo_upright'] if data_name in measured_pressure_dict else 0
+            comp_iop = (comp_iop1 + comp_iop2) / 2
         else:
-            video_dict[video_name].append([frame_num, iop, img_lens_circle[-1], img_inner_circle[-1]])
-    # return video_dict
+            comp_iop = measured_pressure_dict[data_name][comp_method] if data_name in measured_pressure_dict else 0
+        iop_comp.append([comp_iop, cur_perc[1]])
+        # plt.scatter(comp_iop, cur_perc[1], color='blue', s=100)
+        # plt.text(comp_iop, cur_perc[1], data_name)
 
+    # fit line
+    from scipy import stats
+    iop_comp = np.array(iop_comp)
+    slope, intercept, r_value, p_value, std_err = stats.linregress(iop_comp[:,0], iop_comp[:,1]-supine_bias)
+    pred_range = np.linspace(0, 35, 1000)
+    line = slope * pred_range + intercept
+    plt.plot(iop_comp[:, 0], iop_comp[:, 1]-supine_bias, 'o', pred_range, line, linewidth=5, markersize=12)
+
+    # t = stats.t.ppf(0.975, len(iop_comp) - 2)
+    # plot_ci_manual(t, std_err, len(iop_comp), iop_comp[:,0], pred_range, line)
+    # ax.fill_between(x2, y2 + ci, y2 - ci, color="#b9cfe7", edgecolor="")
+
+    # xmax = np.nanmax(np.array(iop_comp), axis=0)[0]+10
+    num_eyes = len(data_names)
+    temp = np.logical_or(np.array(iop_comp)==0, np.isnan(iop_comp))
+    num_matched = num_eyes - np.sum(temp[:,0])
+    plt.xlim([0, 35])
+    plt.ylim([0, 35])
+    plt.xticks(list(range(0, 35, 5)))
+    plt.yticks(list(range(0, 35, 5)))
+    plt.tick_params(labelsize=fsize)
+    plt.xlabel('{} IOP (mmHg)'.format(LABEL_MAP[comp_method]), fontsize=fsize, fontweight='bold')
+    # plt.ylabel('ML median IOP (mmHg)', fontsize=fsize, fontweight='bold')
+    plt.ylabel('Smartphone median IOP (mmHg)', fontsize=fsize, fontweight='bold')
+    # no title for medical publications
+    # plt.title('{} vs ML IOP ({} eyes)'.format(LABEL_MAP[comp_method], num_matched), fontsize=fsize, fontweight='bold')
+    plt.tick_params(labelsize=fsize)
+    plt.grid()
+    print(pd.DataFrame(iop_comp).corr())
+    save_name = os.path.join(save_folder, '{}_scatter.png'.format(comp_method))
+    # plt.savefig(save_name, bbox_inches='tight')
+
+    # bland-altman
+    plt.figure(102)
+    plt.clf()
+    # ax = plt.axes()
+    # ax.set_aspect(aspect=1)
+    plt.gca().set_aspect('equal', adjustable='box')
+    iop_comp2 = []
+    for idx, data_name in enumerate(data_names):
+        cur_iop_data = iop_data[idx]
+        cur_perc = np.percentile(cur_iop_data, q=[25, 50, 75], interpolation='nearest')
+        if comp_method == 'pneumo_avg':
+            comp_iop1 = measured_pressure_dict[data_name]['pneumo_supine'] if data_name in measured_pressure_dict else float('nan')
+            comp_iop2 = measured_pressure_dict[data_name]['pneumo_upright'] if data_name in measured_pressure_dict else float('nan')
+            comp_iop = (comp_iop1 + comp_iop2) / 2
+        else:
+            comp_iop = measured_pressure_dict[data_name][comp_method] if data_name in measured_pressure_dict else float('nan')
+        iop_avg = (comp_iop + (cur_perc[1] - supine_bias)) / 2
+        iop_diff = (cur_perc[1] -supine_bias) - comp_iop
+        iop_comp2.append([iop_avg, iop_diff])
+        # plt.text(iop_avg, iop_diff, data_name)
+    iop_comp2 = np.array(iop_comp2)
+    iop_perc = np.nanpercentile(iop_comp2, q=[0, 2.5, 25, 50, 75, 97.5, 100], axis=0)
+    iop_mean = np.nanmean(iop_comp2, axis=0)  # mean
+    sd = np.nanstd(iop_comp2, axis=0)
+
+    plt.scatter(iop_comp2[:,0], iop_comp2[:,-1], color='blue', s=100)
+    plt.xlim([0, 35])
+    plt.xlabel('Average of IOPs (mmHg)', fontsize=fsize, fontweight='bold')
+    plt.tick_params(labelsize=fsize)
+    plt.ylim([-10, 10])
+    # plt.ylabel('ML - {} (mmHg)'.format(LABEL_MAP[comp_method]), fontsize=fsize, fontweight='bold')
+    plt.ylabel('Smartphone - GAT (mmHg)', fontsize=fsize, fontweight='bold')
+    # plt.title('Bland-Altman of {} vs ML IOP ({} eyes) {}'
+    #           .format(LABEL_MAP[comp_method], num_matched, 'supine bias adjusted' if supine_bias else ''),
+    #           fontsize=fsize, fontweight='bold')
+    # plt.yticks(range(int(np.floor(np.nanmin(iop_comp2, axis=0)[1]-1)), int(np.ceil(np.nanmax(iop_comp2, axis=0)[1]+1)), 5))
+    plt.grid()
+    plt.axhline(iop_mean[1], color='gray', linestyle='--', linewidth=2)
+    # plt.text(1, iop_mean[1]+.2, 'bias={:0.2f}'.format(iop_mean[1]), fontsize=fsize)
+    plt.text(25, iop_mean[1]+.2, 'bias={:0.2f}'.format(iop_mean[1]), fontsize=fsize)
+    plt.axhline(iop_mean[1] + 1.96 * sd[1], color='gray', linestyle='--', linewidth=2)
+    # plt.text(1, iop_mean[1] + 1.96 * sd[1] -.5, '97.5% CI={:0.2f}'.format(iop_mean[1] + 1.96 * sd[1]), fontsize=fsize)
+    plt.text(25, iop_mean[1] + 1.96 * sd[1] +.5, '97.5% CI={:0.2f}'.format(iop_mean[1] + 1.96 * sd[1]), fontsize=fsize)
+    plt.axhline(iop_mean[1] - 1.96 * sd[1], color='gray', linestyle='--', linewidth=2)
+    # plt.text(1, iop_mean[1] - 1.96 * sd[1] +.2, '2.5% CI={:0.2f}'.format(iop_mean[1] - 1.96 * sd[1]), fontsize=fsize)
+    plt.text(25, iop_mean[1] - 1.96 * sd[1] +.2, '2.5% CI={:0.2f}'.format(iop_mean[1] - 1.96 * sd[1]), fontsize=fsize)
+
+    np.sum(np.abs(iop_comp2[:, 1]) < 2) # within 2mmHg
+    save_name = os.path.join(save_folder, '{}_bland.png'.format(comp_method))
+    # plt.savefig(save_name, bbox_inches='tight')
+    return
+
+
+def check_circles_validity(lens_circle, inner_circle):
+    return (not np.any(np.isnan(inner_circle)) and inner_circle != DEFAULT_CIRCLE) and \
+    (not np.any(np.isnan(lens_circle)) and lens_circle != DEFAULT_CIRCLE)
+
+
+def check_circles_vs_manual(lens_circle, inner_circle, manual_lens, manual_inner):
+    lens_radius = lens_circle[-1]
+    lens_radius_manual = manual_lens[-1]
+    inner_radius = inner_circle[-1]
+    inner_radius_manual = manual_inner[-1]
+    lens_error_limit = 0.025    # approx 10px in 425
+    lens_error_margin = lens_radius_manual*lens_error_limit
+    inner_error_limit = 0.05  # approx 10px in 225
+    inner_error_margin = inner_radius_manual*inner_error_limit 
+    if (lens_radius_manual-lens_error_margin < lens_radius < lens_radius_manual+lens_error_margin) and \
+            (inner_radius_manual - inner_error_margin < inner_radius < inner_radius_manual + inner_error_margin):
+        return True
+    else:
+        return False
+
+
+# TODO - change to read from json file
+def visualise_iop_from_json(folder='joanne_seg_manual', json_path=os.path.join(prefix, 'true_avg_circles.json'),
+                            iop_method='halberg', add_jitter=True, manually_checked_csv=None):
     # visualise imgs
     video_save_path = os.path.join(prefix, folder, 'iop')
     if not os.path.isdir(video_save_path):
         os.makedirs(video_save_path)
 
-    for video_name, video_data in video_dict.items():
+    fin = open(json_path).read()
+    true_dict = json.loads(fin)     # prediction dict
+    measured_pressure_dict = get_measured_iops()
+
+    if manually_checked_csv is not None:
+        manual_toks = manually_checked_csv.split(file_sep)
+        manual_folder = file_sep.join(manual_toks[:-1])
+        manual_dict, manual_save_path = make_json_from_preds_txt(folder=manual_folder, txt_file=manual_toks[-1])
+        # organize by videos
+        manual_dict2 = {}
+        manual_dict_transformed = {}
+        for key, item in manual_dict.items():
+            img_toks = key.split('_')
+            video_name = '_'.join(img_toks[:2])
+            frame_num = int(img_toks[2].replace('frame', '').replace('.png', ''))
+            video_manual_lens = item['lens_data']
+            video_manual_inner = item['inner_data']
+            iop = calc_iop_from_circles(video_manual_lens, video_manual_inner, do_halberg=iop_method == 'halberg')
+            if video_name not in manual_dict_transformed:
+                manual_dict_transformed[video_name] = item
+                manual_dict2[video_name] = [[frame_num, iop, video_manual_lens[-1], video_manual_inner[-1]]]
+            else:
+                print('shouldnt hit this in manual_checked_csv', video_name)
+    else:
+        manual_dict_transformed = {}
+        manual_dict2 = {}
+
+    # img_names = [x.replace('.png', '') for x in os.listdir(os.path.join(prefix, folder)) if '.png' in x]
+    img_names = list(true_dict.keys())  # if no pngs extracted from video and prediction made directly
+    video_dict = {}     # for frames by video
+    legit_iop_dict = {}     # for legit circle preds with real circe sizes and iop>0
+    for idx, img_name in enumerate(img_names):
+        img_toks = img_name.split('_')
+        video_name = '_'.join(img_toks[:2])
+        frame_num = int(img_toks[2].replace('frame', '').replace('.png', ''))
+
+        if img_name not in true_dict:  # or '58' in img_name:  # FIXME
+            continue
+        else:  # has truth
+            iop = 0  # reset
+            img_data = true_dict[img_name]
+            img_lens_circle = img_data['lens_data']
+            img_inner_circle = img_data['inner_data']
+            if manual_dict_transformed and video_name in manual_dict_transformed:  # this thresholds against manually checked for boxplot!
+                video_manual_lens = manual_dict_transformed[video_name]['lens_data']
+                video_manual_inner = manual_dict_transformed[video_name]['inner_data']
+                if check_circles_vs_manual(img_lens_circle, img_inner_circle, video_manual_lens, video_manual_inner):
+                    iop = calc_iop_from_circles(img_lens_circle, img_inner_circle, do_halberg=iop_method == 'halberg')
+            else:
+                if check_circles_validity(img_lens_circle, img_inner_circle):  # real circles
+                    iop = calc_iop_from_circles(img_lens_circle, img_inner_circle, do_halberg=iop_method=='halberg')
+                else:  # ignore if not both found
+                    continue
+
+            if iop>0 and manual_dict_transformed and video_name in manual_dict_transformed:
+                legit_iop_dict[img_name] = img_data
+                if video_name not in video_dict:
+                    video_dict[video_name] = [[frame_num, iop, img_lens_circle[-1], img_inner_circle[-1]]]
+                else:
+                    video_dict[video_name].append([frame_num, iop, img_lens_circle[-1], img_inner_circle[-1]])
+    with open(os.path.join(prefix, folder, 'pred_circles_fixed.json'), 'w') as fout:
+        json.dump(legit_iop_dict, fout)
+    fout.close()
+
+    # # iop for each video by frame order
+    dont_plot = ['goldman_group', 'DI_supine', 'DI_upright', 'opa_supine', 'opa_upright', 'iCare_post']
+    # probs = [0, 5, 25, 50, 75, 95, 100]
+    # target_dict = video_dict
+    # for video_name, video_data in target_dict.items():
+    #     video_data = np.array(video_data)
+    #     # stats
+    #     stats_summary = np.percentile(video_data[:, 1:], q=probs, axis=0, interpolation='nearest')
+    #     print(video_name, stats_summary)
+    #
+    #     # visuals
+    #     plt.figure(1); plt.clf()
+    #     plt.scatter(x=video_data[:,0], y=video_data[:,1])   # frame_num vs iop
+    #     plt.grid()
+    #     plt.xlabel('frame number', fontsize=fsize, fontweight='bold')
+    #     plt.ylabel('iop', fontsize=fsize, fontweight='bold')
+    #     plt.title('iop for {}'.format(video_name))
+    #     # color_dict = {'goldman':'yellow', 'tonopen-pre':'green', 'iCare-pre':'red', }
+    #     if video_name in measured_pressure_dict:
+    #         [xmin, xmax, ymin, ymax] = plt.axis()
+    #         xs = np.linspace(np.round(xmin), np.round(xmax), (np.round(xmax)-np.round(xmin))+1)
+    #         for key, val in measured_pressure_dict[video_name].items():
+    #             if key in dont_plot:
+    #                 continue
+    #             if add_jitter:
+    #                 val = float(np.random.normal(val, 0.01, 1))
+    #             key_line = np.array([val for jdx in range(len(xs))])
+    #             plt.plot(xs, key_line, '--', label=key)
+    #         plt.legend(loc='lower left')
+    #     save_name = os.path.join(video_save_path, '{}_iop_{}.png'.format(video_name, iop_method))
+    #     plt.savefig(save_name, bbox_inches='tight')
+    #
+    #     ## sanity check by looking at circle radius
+    #     # lens
+    #     plt.figure(2); plt.clf()
+    #     plt.scatter(x=video_data[:, 0], y=video_data[:, 2])  # frame_num vs lens radius
+    #     plt.grid()
+    #     plt.xlabel('frame number', fontsize=fsize, fontweight='bold')
+    #     plt.ylabel('lens radius in pixels', fontsize=fsize, fontweight='bold')
+    #     plt.title('lens radius for {}'.format(video_name))
+    #     save_name = os.path.join(video_save_path, '{}_lens.png'.format(video_name))
+    #     plt.savefig(save_name, bbox_inches='tight')
+    #
+    #     # inner
+    #     plt.figure(3); plt.clf()
+    #     plt.scatter(x=video_data[:, 0], y=video_data[:, 3])  # frame_num vs inner radius
+    #     plt.grid()
+    #     plt.xlabel('frame number', fontsize=fsize, fontweight='bold')
+    #     plt.ylabel('inner radius in pixels', fontsize=fsize, fontweight='bold')
+    #     plt.title('inner radius for {}'.format(video_name))
+    #     save_name = os.path.join(video_save_path, '{}_inner.png'.format(video_name))
+    #     plt.savefig(save_name, bbox_inches='tight')
+
+    # summarize results and plot against each other
+    # probs = [0, 5, 25, 50, 75, 95, 100]
+    data_names = []
+    iop_data = []
+    # exclude_videos = ['iP060_OS', 'iP060_OD', 'iP050_OS', 'iP063_OS', 'iP063_OD', 'iP075_OS', 'iP050_OD', 'iP051_OD']  # bad videos - manually checked
+    exclude_videos = ['iP006_OD',   # squeezer- bad data
+                      # 'iP075_OD',   # formula is bad for 253/335
+                      # 'iP044_OS',   # formula is bad for 313/432
+                      # 'iP075_OS',   # highish
+                      # 'iP062_OS',
+                      # 'iP062_OD',
+                      # 'iP059_OS',
+                      # 'iP059_OD',
+                      # 'iP031_OD',
+                      # 'iP023_OS',   # lowish
+                      # 'iP076_OD',
+                      # 'iP052_OD',
+                      # 'iP052_OS',
+                      # 'iP018_OD',
+                      # 'iP012_OD',
+                      ]
+    target_dict = manual_dict2
+    target_dict = video_dict
+    for video_name, video_data in target_dict.items():
         video_data = np.array(video_data)
-        # stats
-        probs = [0, 5, 25, 50, 75, 95, 100]
-        stats_summary = np.percentile(video_data[:, 1:], q=probs, axis=0)
-        print(video_name, stats_summary)
+        if video_name in exclude_videos: continue   # exclude
+        data_names.append(video_name)
+        iop_data.append(video_data[:, 1])
+    plt.figure(1)
+    plt.clf()
+    with open('processed_patients.txt', 'w') as fout:
+        fout.write('\n'.join(sorted(data_names)))
+    fout.close()
 
-        # visuals
-        plt.clf()
-        # if video_name =='iP057_OS':
-        #     video_data[(video_data[:,3]<190) | (video_data[:,3]>220), :] = np.nan
-        #     video_data[(video_data[:,2]<350) | (video_data[:,2]>370), :] = np.nan
-        # elif video_name =='iP060_OD':
-        #     video_data[(video_data[:,3]>200), :] = np.nan
-        #     video_data[(video_data[:,2]<310) | (video_data[:,2]>330), :] = np.nan
+    # NB - supine should be higher
+    fsize=24
+    supine_bias = 4.1
+    for idx, data_name in enumerate(data_names):
+        print(idx, data_name, np.median(iop_data[idx]))
+    make_iop_bland_altman(data_names, measured_pressure_dict, iop_data, comp_method='goldman', save_folder=video_save_path, supine_bias=supine_bias)
+    # make_iop_bland_altman(data_names, measured_pressure_dict, iop_data, comp_method='pneumo_supine', save_folder=video_save_path, supine_bias=None)
+    # make_iop_bland_altman(data_names, measured_pressure_dict, iop_data, comp_method='pneumo_upright', save_folder=video_save_path, supine_bias=None)
+    # make_iop_bland_altman(data_names, measured_pressure_dict, iop_data, comp_method='pneumo_avg', save_folder=video_save_path, supine_bias=None)
+    #
+    # # output iops for joanne
+    # with open(os.path.join(video_save_path, 'iop_quantiles.txt'), 'w') as fout:
+    #     for idx, data_name in enumerate(data_names):
+    #         cur_iop_data = iop_data[idx]
+    #         cur_perc = np.percentile(cur_iop_data, q=[25, 50, 75])
+    #         fout.write('{},{:.2f},{:.2f},{:.2f}\n'.format(data_name, cur_perc[0], cur_perc[1], cur_perc[2]))
+    # fout.close()
+    #
+    # modified bland-altman
+    iop_comp3 = []
+    for idx, data_name in enumerate(data_names):
+        cur_iop_data = iop_data[idx]
+        cur_perc = np.percentile(cur_iop_data, q=[25, 50, 75])
+        goldman = measured_pressure_dict[data_name]['goldman'] if data_name in measured_pressure_dict else float('nan')
+        pneumo_sup = measured_pressure_dict[data_name]['pneumo_supine'] if data_name in measured_pressure_dict else float('nan')
+        pneumo_up = measured_pressure_dict[data_name]['pneumo_upright'] if data_name in measured_pressure_dict else float('nan')
+        tono_up = measured_pressure_dict[data_name]['tonopen_pre'] if data_name in measured_pressure_dict else float('nan')
+        tono_sup = measured_pressure_dict[data_name]['tonopen_supine'] if data_name in measured_pressure_dict else float('nan')
+        icare = measured_pressure_dict[data_name]['iCare_pre'] if data_name in measured_pressure_dict else float('nan')
+        iop_comp3.append([goldman, pneumo_sup, pneumo_up, cur_perc[1], tono_sup, tono_up, icare])
+    iop_comp3 = np.array(iop_comp3)
+    ml_measurements = iop_comp3[:, 3] #- supine_bias
+    # for jdx in [0, 2, 5, 6]:    # iop_comp3.append([goldman, pneumo_sup, pneumo_up, cur_perc[1], tono_sup, tono_up, icare])
+    for jdx in [1, 4]:
+        temp = iop_comp3[:, jdx]
+        cur_diff = ml_measurements - temp
+        bias_mean = np.nanmean(cur_diff)
+        bias_std = np.nanstd(cur_diff)
+        print(jdx, bias_mean, bias_std, bias_mean-1.96*bias_std, bias_mean+1.96*bias_std)
 
-        plt.scatter(x=video_data[:,0], y=video_data[:,1])   # frame_num vs iop
-        plt.grid()
-        plt.xlabel('frame number')
-        plt.ylabel('iop')
-        plt.title('iop for {}'.format(video_name))
-        measured_pressure_dict = {'iP060_OD':{'goldman':11, 'tonopen-pre':11, 'iCare-Pre':11.5,
-                                              'iCare-Post':11.3, 'Pneuma-supine':20, 'Pneuma-upright':14.5},
-                                  'iP057_OS': {'goldman': 12, 'tonopen-pre': 12, 'iCare-Pre': 14,
-                                               'iCare-Post': 13, 'Pneuma-supine': 20, 'Pneuma-upright': 18.5}}
-        # color_dict = {'goldman':'yellow', 'tonopen-pre':'green', 'iCare-pre':'red', }
-        if video_name in measured_pressure_dict:
-            [xmin, xmax, ymin, ymax] = plt.axis()
-            xs = np.linspace(np.round(xmin), np.round(xmax), (np.round(xmax)-np.round(xmin))+1)
-            for key, val in measured_pressure_dict[video_name].items():
-                key_line = np.array([val for jdx in range(len(xs))])
-                plt.plot(xs, key_line, '--', label =key)
-            plt.legend(loc='lower right')
-        save_name = os.path.join(video_save_path, '{}_iop.png'.format(video_name))
-        plt.savefig(save_name)
+    # GAT bias on 38
+    cur_diff = ml_measurements - iop_comp3[:, 0]
+    temp2 = cur_diff[~np.isnan(iop_comp3[:, 1])]
+    print([np.mean(temp2) - 1.96 * np.std(temp2), np.mean(temp2) + 1.96 * np.std(temp2)])
 
-        # lens
-        plt.clf()
-        plt.scatter(x=video_data[:, 0], y=video_data[:, 2])  # frame_num vs iop
-        plt.grid()
-        plt.xlabel('frame number')
-        plt.ylabel('lens radius in pixels')
-        plt.title('lens radius for {}'.format(video_name))
-        save_name = os.path.join(video_save_path, '{}_lens.png'.format(video_name))
-        plt.savefig(save_name)
+    # modified bland-altman
+    pneumo_sup2goldmann = iop_comp3[:, 1]-iop_comp3[:, 0] #- supine_bias
+    pneumo_sup2goldmann_bias = np.nanmean(pneumo_sup2goldmann)
+    pneumo_sup2goldmann_std = np.nanstd(pneumo_sup2goldmann)
 
-        # inner
-        plt.clf()
-        plt.scatter(x=video_data[:, 0], y=video_data[:, 3])  # frame_num vs inner radius
-        plt.grid()
-        plt.xlabel('frame number')
-        plt.ylabel('inner radius in pixels')
-        plt.title('inner radius for {}'.format(video_name))
-        save_name = os.path.join(video_save_path, '{}_inner.png'.format(video_name))
-        plt.savefig(save_name)
+    pneumo_up2goldmann = iop_comp3[:, 2]-iop_comp3[:, 0]
+    pneumo_up2goldmann_bias = np.nanmean(pneumo_up2goldmann)
+    pneumo_up2goldmann_std = np.nanstd(pneumo_up2goldmann)
+
+    dl2goldmann = iop_comp3[:, 3]-iop_comp3[:, 0] #- supine_bias
+    dl2goldmann_bias = np.nanmean(dl2goldmann)
+    dl2goldmann_std = np.nanstd(dl2goldmann)
+
+    tono_up2goldman = iop_comp3[:, 5]-iop_comp3[:, 0]
+    tono_up_bias = np.nanmean(tono_up2goldman)
+    tono_up_std = np.nanstd(tono_up2goldman)
+
+    tono_sup2goldman = iop_comp3[:, 4] - iop_comp3[:, 0] #- supine_bias
+    tono_sup_bias = np.nanmean(tono_sup2goldman)
+    tono_sup_std = np.nanstd(tono_sup2goldman)
+
+    # add jitter
+    plt.figure(103); plt.clf()
+    plt.rc('hatch', color='black', linewidth=5)
+    ax = plt.axes()
+    plt.plot(iop_comp3[:, 0], pneumo_sup2goldmann+np.random.rand(pneumo_sup2goldmann.size)*0.1, 'bX', markersize=18, label='Pneumo-Supine -GAT')
+    # plt.plot(iop_comp3[:, 0], pneumo_up2goldmann+np.random.rand(pneumo_up2goldmann.size)*0.1 , 'bX', markersize=18, label='Pneumo-Upright - GAT',)
+    plt.plot(iop_comp3[:, 0], dl2goldmann+np.random.rand(dl2goldmann.size)*0.1, 'kP', markersize=18, label='Smartphone - GAT')
+    plt.plot(iop_comp3[:, 0], tono_sup2goldman+np.random.rand(tono_sup2goldman.size) * 0.1, 'ro', markersize=18, label='Tonopen-Supine - GAT')
+    # plt.plot(iop_comp3[:, 0], tono_up2goldman+np.random.rand(tono_up2goldman.size) * 0.1, 'ro', markersize=18, label='Tonopen-Upright - GAT')
+    plt.tick_params(labelsize=fsize)
+    # add bias lines
+    x_lim = ax.get_xlim()
+    ci_x_range = np.linspace(x_lim[0], x_lim[-1], 1000)
+    plt.axhline(pneumo_sup2goldmann_bias, color='blue', linestyle='--', linewidth=3)
+    plt.text(25, pneumo_sup2goldmann_bias + .2, 'bias={:0.2f}'.format(pneumo_sup2goldmann_bias), fontsize=fsize)
+    ax.fill_between(ci_x_range, np.repeat(pneumo_sup2goldmann_bias+1.96*pneumo_sup2goldmann_std,1000),
+                    np.repeat(pneumo_sup2goldmann_bias-1.96*pneumo_sup2goldmann_std,1000), color="blue", edgecolor="black", alpha=.2)
+    # plt.axhline(pneumo_up2goldmann_bias, color='blue', linestyle='--', linewidth=3)
+    # plt.text(25, pneumo_up2goldmann_bias +.2, 'bias={:0.2f}'.format(pneumo_up2goldmann_bias), fontsize=fsize)
+    # ax.fill_between(ci_x_range, np.repeat(pneumo_up2goldmann_bias+1.96*pneumo_up2goldmann_std,1000),
+    #                 np.repeat(pneumo_up2goldmann_bias -1.96*pneumo_up2goldmann_std,1000), color="blue", edgecolor="black", alpha=.2)
+    # plt.axhline(tono_up_bias, color='red', linestyle='-.', linewidth=3)
+    # plt.text(25, tono_up_bias + .2, 'bias={:0.2f}'.format(tono_up_bias), fontsize=fsize)
+    # ax.fill_between(ci_x_range, np.repeat(tono_up_bias+1.96*tono_up_std,1000), np.repeat(tono_up_bias-1.96*tono_up_std,1000), color="red", edgecolor="black", alpha=.2)
+    plt.axhline(tono_sup_bias, color='red', linestyle='-.', linewidth=3)
+    plt.text(25, tono_sup_bias + .2, 'bias={:0.2f}'.format(tono_sup_bias), fontsize=fsize)
+    ax.fill_between(ci_x_range, np.repeat(tono_sup_bias+1.96*tono_sup_std,1000), np.repeat(tono_sup_bias-1.96*tono_sup_std,1000), color="red", edgecolor="black", alpha=.2)
+    ## do this last to make it more obvious
+    dl_color = 'green'
+    plt.axhline(dl2goldmann_bias, color=dl_color, linestyle=':', linewidth=3)
+    plt.text(25, dl2goldmann_bias -.0, 'bias={:0.2f}'.format(dl2goldmann_bias), fontsize=fsize)
+    ax.fill_between(ci_x_range, np.repeat(dl2goldmann_bias+1.96*dl2goldmann_std,1000), np.repeat(dl2goldmann_bias-1.96*dl2goldmann_std,1000), facecolor='none', edgecolor="black", alpha=.2, hatch='//')
+    # ax.fill(ci_x_range, np.repeat(dl2goldmann_bias+1.96*dl2goldmann_std,1000), np.repeat(dl2goldmann_bias-1.96*dl2goldmann_std,1000), fill=True, edgecolor="black", alpha=.2, hatch='//')
+
+    # plt.xlim([0, 30])
+    plt.xlim(x_lim)
+    plt.xlabel('GAT IOP (mmHg)', fontsize=fsize, fontweight='bold')
+    # plt.ylim([-5, 15])
+    plt.ylabel('Various Methods - GAT (mmHg)', fontsize=fsize, fontweight='bold')
+    # plt.title('Modified Bland-Altman', fontsize=fsize, fontweight='bold')
+    # plt.legend()
+    plt.grid()
+    # save_name = os.path.join(video_save_path, 'modified_bland.png')
+    # plt.savefig(save_name, bbox_inches='tight')
+
+    # pachy plots
+    pachy_arr = np.zeros((len(iop_comp3), 2))
+    pachy_dict = read_pachy()
+    for idx, data_name in enumerate(data_names):
+        pachy_arr[idx, :] = pachy_dict[data_name]
+    np.sum(iop_comp3[:, 0] == pachy_arr[:, 1])  # sanity check
+
+    from scipy import stats
+    non_nan_idx = ~np.isnan(pachy_arr[:, 0]) & ~np.isnan(iop_comp3[:, 0])
+    slope, intercept, r_value, p_value, std_err = stats.linregress(pachy_arr[non_nan_idx, 0], iop_comp3[non_nan_idx, 0])    # gat vs pachy
+    non_nan_idx = ~np.isnan(pachy_arr[:, 0]) & ~np.isnan(iop_comp3[:, 3])
+    slope, intercept, r_value, p_value, std_err = stats.linregress(pachy_arr[non_nan_idx, 0], iop_comp3[non_nan_idx, 3])    # ml vs pachy
+    slope, intercept, r_value, p_value, std_err = stats.linregress(pachy_arr[non_nan_idx, 0], iop_comp3[non_nan_idx, 3] - iop_comp3[non_nan_idx, 0])  # delta vs pachy
+
+    plt.figure(105)
+    plt.clf()
+    # plt.scatter(pachy_arr[:, 0], iop_comp3[:, 0], label='GAT', s=240, marker='*')    # gat vs pachy
+    # plt.scatter(pachy_arr[:, 0], iop_comp3[:, 3], label='Smartphone', s=240, marker='X')    # ml vs pachy
+    plt.scatter(pachy_arr[:, 0], iop_comp3[:, 3] - iop_comp3[:, 0] - supine_bias, label='GAT-Smartphone', s=240, marker='o')    # delta vs pachy
+    plt.grid()
+    # plt.legend()
+    plt.ylabel('IOP (mmHg)', fontsize=fsize, fontweight='bold')
+    # plt.rc('text', usetex=True)
+    plt.xlabel('Corneal thickness ($\mu m$)', fontsize=fsize, fontweight='bold')
+
+    # only plot videos with auxiliary iop measurements
+    complete_iop_data_idx = []
+    for idx, data_name in enumerate(data_names):
+        if data_name in measured_pressure_dict:
+            complete_iop_data_idx.append(idx)
+    data_names = [data_names[x] for x in complete_iop_data_idx]
+    iop_data = [iop_data[x] for x in complete_iop_data_idx]
+
+    # order by median
+    iop_median_sorted_tuple = sorted(enumerate(iop_data), key=lambda c: np.median(c[1]))
+    data_names = [data_names[x[0]] for x in iop_median_sorted_tuple]
+    iop_data = [np.array(iop_data[x[0]])-supine_bias for x in iop_median_sorted_tuple]
+
+    plt.figure(101); plt.clf()
+    plt.boxplot(iop_data, notch=False, showfliers=False)
+    plt.grid()
+    # plt.xticks(np.arange(len(data_names)+1), ['']+data_names, rotation=70)
+    plt.xticks([])
+    plt.xlabel('Patient Eyes', fontsize=fsize, fontweight='bold')
+    plt.ylim([0, 35])
+    plt.yticks(list(range(0, 31, 5)))
+    ax = plt.gca()
+    ax.tick_params(axis='y', which='major', labelsize=fsize)
+    # ax.tick_params(axis='both', which='minor', labelsize=16)
+    # plt.rcParams.update({'font.size': 18, 'font.weight': 'bold'})
+    plt.ylabel('IOP (mmHg)', fontsize=fsize, fontweight='bold')
+    # # Save the default tick positions, so we can reset them...
+    # locs, labels = plt.xticks()
+    iop_types = list(np.setdiff1d(list(next(iter(measured_pressure_dict.values())).keys()), dont_plot))
+    dont_plot = ['goldman_group', 'DI_supine', 'DI_upright', 'opa_supine', 'opa_upright', 'iCare_post', 'pneumo_supine', 'tonopen_supine']
+    for iop_type in iop_types:
+        if iop_type in dont_plot:
+            continue
+        iop_type_data = []
+        for idx, video_name in enumerate(data_names):
+            if video_name in measured_pressure_dict:
+                cur_iop = measured_pressure_dict[video_name][iop_type]
+                x_val = idx + 1
+                if add_jitter:
+                    # cur_iop = float(np.random.normal(cur_iop, 0.01, 1))
+                    x_val = float(np.random.normal(x_val, .03, 1))
+                iop_type_data.append((x_val, cur_iop))
+
+        iop_type_data = np.array(iop_type_data)
+        real_label = LABEL_MAP[iop_type]
+        type_marker = MARKER_MAP[iop_type]
+        if iop_type == 'goldman':
+            plt.scatter(iop_type_data[:, 0], iop_type_data[:, 1], label=real_label, s=240, marker=type_marker)
+            # plt.scatter(iop_type_data[:, 0], iop_type_data[:, 1]+5, label='goldman+5', s=240, marker=type_marker)
+        else:
+            plt.scatter(iop_type_data[:, 0], iop_type_data[:, 1], label=real_label, s=60, marker=type_marker)
+    # plt.legend(fontsize=fsize, loc='best')
+    # save_name = os.path.join(video_save_path, 'video_boxplot.png')
+    save_name = os.path.join(video_save_path, 'video_boxplot_cleaned.png')
+    # plt.title('Distribution of ML IOPs vs measured IOPs', fontsize=fsize, fontweight='bold')
+    # plt.figure(101).text(.5, .05,
+    #                      'Figure 1. Smartphone tonometer measurements compared to other tonometers. '
+    #                      'Smartphone IOPs are represented as a box-plot with the median value noted.',
+    #                      ha='center', fontsize=12)
+    plt.savefig(save_name, bbox_inches='tight')
+
+    # # include OPA for boxplot
+    # plt.figure(100); plt.clf()
+    # pneumo_types = ['pneumo_upright', 'pneumo_supine', 'goldman']
+    # pneumo_available = [measured_pressure_dict[video_name]['pneumo_upright'] for video_name in data_names]
+    # avail_data_names = list(np.array(data_names)[~np.isnan(pneumo_available)])
+    # avail_data = np.array(iop_data)[~np.isnan(pneumo_available), ]
+    # plt.boxplot(avail_data, notch=False, showfliers=False)
+    # plt.xticks([])
+    # plt.ylim([0, 40])
+    # plt.grid()
+    # plt.yticks(list(range(0, 41, 5)))
+    # ax = plt.gca()
+    # ax.tick_params(axis='y', which='major', labelsize=24)
+    # plt.ylabel('IOP (mmHg)', fontsize=fsize, fontweight='bold')
+    # for iop_type in pneumo_types:
+    #     iop_type_data = []
+    #     for idx, video_name in enumerate(avail_data_names):
+    #         if video_name in measured_pressure_dict:
+    #             cur_iop = measured_pressure_dict[video_name][iop_type]
+    #             x_val = idx + 1
+    #             if add_jitter:
+    #                 x_val = float(np.random.normal(x_val, .03, 1))
+    #
+    #             if iop_type!='goldman':
+    #                 pos_type = iop_type.replace('pneumo_', '')
+    #                 opa_type = 'opa_'+pos_type
+    #                 opa = measured_pressure_dict[video_name][opa_type]
+    #                 iop_type_data.append((x_val, cur_iop, opa))
+    #             else:
+    #                 iop_type_data.append((x_val, cur_iop, 0))
+    #
+    #     iop_type_data = np.array(iop_type_data)
+    #     real_label = LABEL_MAP[iop_type]
+    #     type_marker = MARKER_MAP[iop_type]
+    #
+    #     if iop_type == 'goldman':
+    #         plt.scatter(iop_type_data[:, 0], iop_type_data[:, 1], label=real_label, s=240, marker=type_marker)
+    #     else:
+    #         plt.scatter(iop_type_data[:, 0], iop_type_data[:, 1], label=real_label, s=60, marker=type_marker)
+    #         plt.scatter(iop_type_data[:, 0], iop_type_data[:, 1]-iop_type_data[:, 2]/2, label='{}-opa'.format(real_label), s=60, marker="<" if pos_type=='upright' else "3")
+    #         plt.scatter(iop_type_data[:, 0], iop_type_data[:, 1]+iop_type_data[:, 2]/2, label='{}+opa'.format(real_label), s=60, marker=">" if pos_type=='upright' else "4")
+    # plt.legend(fontsize=fsize, loc='best')
+    # plt.title('Distribution of ML IOPs vs Pneumo', fontsize=fsize, fontweight='bold')
+    # plt.figure(100).text(.5, .05,
+    #                      'Figure 1. Smartphone tonometer measurements compared to Pneumo with OPA. '
+    #                      'Smartphone IOPs are represented as a box-plot with the median value noted.',
+    #                      ha='center', fontsize=12)
+    #
+    # # opa is amplitude so compare against and min
+    # avail_data = np.array(iop_data)[~np.isnan(pneumo_available),]
+    # avail_data_perc = []
+    # iop_type_data = []
+    # for idx, video_name in enumerate(avail_data_names):
+    #     cur_perc = np.percentile(avail_data[idx,], q=[0, 25, 50, 75, 100], interpolation='nearest')
+    #     avail_data_perc.append(cur_perc)
+    #     pneumo_up = measured_pressure_dict[video_name]['pneumo_upright']
+    #     opa_up = measured_pressure_dict[video_name]['opa_upright']
+    #     pneumo_sup = measured_pressure_dict[video_name]['pneumo_supine']
+    #     opa_sup = measured_pressure_dict[video_name]['opa_supine']
+    #     iop_type_data.append((pneumo_up, opa_up, pneumo_sup, opa_sup))
+    # avail_data_perc = np.array(avail_data_perc)
+    # iop_type_data = np.array(iop_type_data)
+    # plt.figure(99); plt.clf()
+    # ml_max_min = avail_data_perc[:, -1]-avail_data_perc[:, 0]
+    # ml_iqr = avail_data_perc[:, -2]-avail_data_perc[:, 1]
+    # plt.scatter(range(len(avail_data_names)), ml_max_min, label='ML opa')
+    # plt.scatter(range(len(avail_data_names)), ml_iqr, label='ML IQR')
+    # plt.scatter(range(len(avail_data_names)), iop_type_data[:, 1], label='OPA upright')
+    # plt.scatter(range(len(avail_data_names)), iop_type_data[:, -1], label='OPA supine')
+    # plt.legend(); plt.grid()
+    # np.corrcoef([ml_max_min, ml_iqr, iop_type_data[:, 1], iop_type_data[:, -1]])
+    # import scipy.stats as stats
+    # stats.spearmanr([ml_max_min, ml_iqr, iop_type_data[:, 1], iop_type_data[:, -1]], axis=1)
+    # # plt.figure(99).text(.5, .05,
+    # #                      'Figure 1. Smartphone tonometer measurements compared to Pneumo with OPA. '
+    # #                      'Smartphone IOPs are represented as a box-plot with the median value noted.',
+    # #                      ha='center', fontsize=12)
+
+    # # kmeans vs ted iops side-by-side
+    # ted_json_path = 'z:/tspaide/pspnet-pytorch/pressures.json'
+    # fin = open(ted_json_path).read()
+    # ted_dict = json.loads(fin)
+    # ted_data = []
+    # for idx, data_name in enumerate(data_names):
+    #     cur_data = np.asarray(ted_dict[data_name.replace('iP0', '')])
+    #     # cur_data[np.isnan(cur_data)] = 0
+    #     cur_data = cur_data[~np.isnan(cur_data)]
+    #     ted_data.append(cur_data)
+    #
+    # plt.figure(1); plt.clf()
+    # plt.subplot(121); plt.boxplot(iop_data, notch=False, showfliers=False)
+    # plt.grid(); plt.xticks(np.arange(len(data_names) + 1), [''] + data_names); plt.ylim([-10, 40]); plt.title('kmeans')
+    # plt.subplot(122); plt.boxplot(ted_data, notch=False, showfliers=False)
+    # plt.grid(); plt.xticks(np.arange(len(data_names) + 1), [''] + data_names); plt.ylim([-10, 40]); plt.title('pspnet')
+    # save_name = os.path.join(video_save_path, 'comparison_boxplots.png')
+    # plt.savefig(save_name)
 
     return video_dict
 
@@ -1699,30 +2275,42 @@ def calc_iop_halberg(dia, tonometer=5):
     return iop
 
 
+def calc_iop_formula(dia, tonometer=5):
+    iop = tonometer/(1.36*np.pi*(dia/2/10)**2)  # /10 for mm->cm
+    return iop
+
+
 def calc_iop_wrapper(dia, tonometer=5, do_halberg=True):
     if do_halberg:
         return calc_iop_halberg(dia, tonometer)
     else:
-        return calc_iop_tonomat(dia, tonometer)
+        return calc_iop_formula(dia, tonometer=5)
+        # return calc_iop_tonomat(dia, tonometer)
 
 
-def calc_iop_from_circles(lens_circle, inner_circle):
+def calc_iop_from_circles(lens_circle, inner_circle, do_halberg=True):
     real_lens_dia = 9.1     # mm
     real_inner_dia = real_lens_dia * inner_circle[-1]/lens_circle[-1]
-    iop = calc_iop_wrapper(real_inner_dia)
+    iop = calc_iop_wrapper(real_inner_dia, do_halberg=do_halberg)
     return iop
 
 
 # instill memory - allow breaks
-def constrain_sequentially(cur_circle, recent_circles, cur_all, is_lens=False, num_to_remember=10):
+def constrain_sequentially(cur_circle, recent_circles, cur_all, is_lens=False, new_sizes=False, num_to_remember=10):
     if is_lens:
-        size_lim = [RADIUS_LENS_LOWER, RADIUS_LENS_UPPER]
+        if new_sizes:
+            size_lim = [RADIUS_LENS_LOWER_NEW, RADIUS_LENS_UPPER_NEW]
+        else:
+            size_lim = [RADIUS_LENS_LOWER, RADIUS_LENS_UPPER]
         threshold = PERC_THRESHOLD_LENS
     else:
-        size_lim = [RADIUS_INNER_LOWER, RADIUS_INNER_UPPER]
+        if new_sizes:
+            size_lim = [RADIUS_INNER_LOWER_NEW, RADIUS_INNER_UPPER_NEW]
+        else:
+            size_lim = [RADIUS_INNER_LOWER, RADIUS_INNER_UPPER]
         threshold = PERC_THRESHOLD_INNER
 
-    default_circle = [0, 0, 0]
+    default_circle = DEFAULT_CIRCLE
     # check current circle within range of previous circles
     cur_r = cur_circle[2]
     found_circle = False
@@ -1748,7 +2336,7 @@ def constrain_sequentially(cur_circle, recent_circles, cur_all, is_lens=False, n
             for r_c in recent_circles:
                 r_ratios.append(abs(1-r_c[2]/c[2]))  # c will be non-zero
             cur_avg_perc_off = np.mean(r_ratios)    # this allows some large circles as it is average
-            if cur_avg_perc_off<min_avg_perc_off:
+            if cur_avg_perc_off<min_avg_perc_off:   # closest approp_circle to prev_circles
                 min_avg_perc_off = cur_avg_perc_off
                 best_circle, found_circle = c, True
 
@@ -1757,15 +2345,16 @@ def constrain_sequentially(cur_circle, recent_circles, cur_all, is_lens=False, n
         else:  # if nothing within range, return default_circle and not_found
             recent_circles = update_prev_circles(cur_circle, recent_circles, found_circle=False, num_to_remember=num_to_remember)
             # best_circle = cur_circle
-            best_circle = default_circle
+            best_circle = default_circle    # ie consider False Positive
             return best_circle, False, recent_circles
     return best_circle, found_circle, recent_circles
 
 
 def update_prev_circles(best_circle, recent_circles, found_circle, num_to_remember=10):
-    if not found_circle:    # reset if current best_circle looks very different
-        recent_circles = [best_circle]
-        return recent_circles
+    # dont reset - use longer memory to weed out circles, might read out some good ones, but this is conservative
+    # if not found_circle:    # reset if current best_circle looks very different
+    #     recent_circles = [best_circle]
+    #     return recent_circles
 
     if len(recent_circles) < num_to_remember:
         recent_circles.append(best_circle)
@@ -1776,7 +2365,7 @@ def update_prev_circles(best_circle, recent_circles, found_circle, num_to_rememb
 
 
 # post-processing with all-circles; and instead of history use +/-10% on median inner circle since 60% correct on inner and 80% on lens so far
-def constrain_kmeans_circles(comp_folder, circle_preds_file, all_circles_file, base_folder='new_video_frames', num_to_remember=10):
+def constrain_kmeans_circles(comp_folder, circle_preds_file, all_circles_file, base_folder='new_video_frames', num_to_remember=10, new_sizes=False):
     outfile = 'kmeans_preds_seq.txt'
     save_folder = os.path.join(prefix, comp_folder, 'seq')
     if not os.path.isdir(save_folder):
@@ -1786,6 +2375,8 @@ def constrain_kmeans_circles(comp_folder, circle_preds_file, all_circles_file, b
     all_circles_dict = read_all_circles(comp_folder, all_circles_file=all_circles_file)     # {video_name:{frame_num:[circle_coords]}}
     circle_dict, json_path = make_json_from_preds_txt(folder=comp_folder, txt_file=circle_preds_file)   # {video_name_frame_num:{inner:[], lens":coords}}
     video_names = all_circles_dict.keys()
+
+    constrained_circles_dict = {}
     for video_name, video_dict in all_circles_dict.items():
         recent_lens = []
         recent_inner = []
@@ -1798,51 +2389,62 @@ def constrain_kmeans_circles(comp_folder, circle_preds_file, all_circles_file, b
             inner_circle = cur_circles['inner_data']
             lens_circle = cur_circles['lens_data']
             cur_all = video_dict[frame_num]
-            inner_circle_new, found_inner_circle, recent_inner = constrain_sequentially(inner_circle, recent_inner, cur_all, is_lens=False, num_to_remember=num_to_remember)
-            lens_circle_new, found_lens_circle, recent_lens = constrain_sequentially(lens_circle, recent_lens, cur_all, is_lens=True, num_to_remember=num_to_remember)
+            inner_circle_new, found_inner_circle, recent_inner = \
+                constrain_sequentially(inner_circle, recent_inner, cur_all, is_lens=False, new_sizes=new_sizes, num_to_remember=num_to_remember)
+            lens_circle_new, found_lens_circle, recent_lens = \
+                constrain_sequentially(lens_circle, recent_lens, cur_all, is_lens=True, new_sizes=new_sizes, num_to_remember=num_to_remember)
+            constrained_circles_dict[key] = {'inner_data':inner_circle_new, 'inner_found':found_inner_circle,
+                                             'lens_data':lens_circle_new, 'lens_found':found_lens_circle}
 
             # visualise and save and write to file
             img_name2 = '{}_frame{}.png'.format(video_name, frame_num)
             save_path = os.path.join(prefix, save_folder, img_name2)
             text_path = os.path.join(prefix, save_folder, outfile)
             orig_img = cv2.imread(os.path.join(prefix, base_folder, img_name2))
-            save_circles(save_path, text_path, img_name2, orig_img, found_lens_circle, lens_circle, inner_circle,
+            save_circles(save_path, text_path, img_name2, orig_img, found_lens_circle, lens_circle_new, inner_circle_new,
                          found_inner_circle)
-    return
+    return constrained_circles_dict
 
 
 # fix circle sizes for new videos - different size limits
 def redo_circles(comp_folder, base_folder='new_video_frames', visualise=False):
     all_circles_dict = read_all_circles(comp_folder)
-    save_folder = os.path.join(prefix, comp_folder, 'fixed_new')
+    # save_folder = os.path.join(prefix, comp_folder, 'fixed_new')
+    save_folder = os.path.join(prefix, comp_folder, 'fixed_new2')
     if not os.path.isdir(save_folder):
         os.makedirs(save_folder)
     outfile = 'kmean_preds_new_size_lim.txt'
 
     for video_name, frame_dicts in all_circles_dict.items():
+        # if video_name not in ['iP060_OS']:
+        #     continue
+
         sorted_frame_nums = sorted(frame_dicts.keys())
         for frame_num in sorted_frame_nums:
+            # if frame_num<500:
+            #     continue
             img_name2 = '{}_frame{}.png'.format(video_name, frame_num)
 
             # if not os.path.isfile(pred_path):   # file was misnamed
             #     continue
-            # if visualise:
-            #     pred_circle_img = cv2.imread(os.path.join(prefix, comp_folder, img_name2))
-            #     all_circle_img = cv2.imread(os.path.join(prefix, comp_folder, 'all_circles', img_name2))
-            #     kmeans_img = cv2.imread(os.path.join(prefix, comp_folder, 'kmeans', img_name2))
-            #     plt.figure(1)
-            #     plt.clf()
-            #     plt.imshow(pred_circle_img)
-            #     plt.figure(2)
-            #     plt.clf()
-            #     plt.imshow(all_circle_img)
-            #     plt.figure(3)
-            #     plt.clf()
-            #     plt.imshow(kmeans_img)
+            if visualise:
+                pred_circle_img = cv2.imread(os.path.join(prefix, comp_folder, img_name2))
+                all_circle_img = cv2.imread(os.path.join(prefix, comp_folder, 'all_circles', img_name2))
+                kmeans_img = cv2.imread(os.path.join(prefix, comp_folder, 'kmeans', img_name2))
+                plt.figure(1)
+                plt.clf()
+                plt.imshow(pred_circle_img)
+                plt.figure(2)
+                plt.clf()
+                plt.imshow(all_circle_img)
+                plt.figure(3)
+                plt.clf()
+                plt.imshow(kmeans_img)
 
             frame_circles = frame_dicts[frame_num]
+            orig_img = cv2.imread(os.path.join(prefix, base_folder, img_name2))
             lens_circle, found_lens_circle, inner_circle, found_inner_circle = \
-                process_circles(frame_circles, None, lens_size_lim=[RADIUS_LENS_LOWER_NEW, RADIUS_LENS_UPPER_NEW],
+                process_circles(frame_circles, orig_img, lens_size_lim=[RADIUS_LENS_LOWER_NEW, RADIUS_LENS_UPPER_NEW],
                                 inner_size_lim=[RADIUS_INNER_LOWER_NEW, RADIUS_INNER_UPPER_NEW], visualise=False)
 
             img_name = '{}_frame{}'.format(video_name, frame_num)
@@ -1851,9 +2453,6 @@ def redo_circles(comp_folder, base_folder='new_video_frames', visualise=False):
             # save new images
             save_path = os.path.join(prefix, save_folder, img_name2)
             text_path = os.path.join(prefix, save_folder, outfile)
-            orig_img = cv2.imread(os.path.join(prefix, base_folder, img_name2))
-            # print(os.path.join(prefix, base_folder, img_name2))
-            # print(orig_img.shape)
             save_circles(save_path, text_path, img_name, orig_img, found_lens_circle, lens_circle, inner_circle,
                          found_inner_circle)
     return
@@ -1861,7 +2460,8 @@ def redo_circles(comp_folder, base_folder='new_video_frames', visualise=False):
 
 def read_all_circles(comp_folder, all_circles_file='all_circles.csv'):
     all_circles_dict = {}
-    with open(os.path.join(prefix, comp_folder, all_circles_file), 'r') as fin:
+    real_circles_path = all_circles_file if '\\' in all_circles_file else os.path.join(prefix, comp_folder, all_circles_file)   # only matters for windows. linux is smart with os.path.join
+    with open(real_circles_path, 'r') as fin:
         for l in fin.readlines():
             l_toks = l.rstrip().split(',')
             img_name = l_toks[0]
@@ -1910,6 +2510,9 @@ def extract_frames(video_names, outdir, start_end_dict={}, avg_skip=5, stochasti
 
         if video_name_full in start_end_dict:
             start, end = start_end_dict[video_name_full]
+        else:   # all frames
+            start = 0
+            end = len(frames)
 
         video_name = '_'.join(video_name_full.split('/')[-1].split()[:2])
         counter = start
@@ -1924,47 +2527,81 @@ def extract_frames(video_names, outdir, start_end_dict={}, avg_skip=5, stochasti
     return
 
 
-NEW_VIDEOS = ['iP057 07Jul2018/iP057 OD - 20180709_213052000_iOS', 'iP057 07Jul2018/iP057 OS - 20180709_213151000_iOS',
-              'iP058 16Jul2018/iP058 OD, 120 ISO', 'iP058 16Jul2018/iP058 OS, 120 ISO',
-              'iP059 16Jul2018/iP059 OD - 20180716_212537000_iOS', 'iP059 16Jul2018/iP059 OS - 20180716_212624000_iOS',
-              'iP060 17Jul2018/iP060 OD - 20180717_175526000_iOS', 'iP060 17Jul2018/iP060 OS - 20180717_175557000_iOS',
-              # 'iP061 30Jul2018/20180730_204748000_iOS', 'iP061 30Jul2018/20180730_204824000_iOS',
-              # 'iP062 30Jul2018/20180730_225453000_iOS', 'iP062 30Jul2018/20180730_225528000_iOS',
-              # 'iP063 31Jul2018/20180731_185148000_iOS', 'iP063 31Jul2018/20180731_185231000_iOS',
-              # 'iP064 31Jul2018/20180731_204901000_iOS', 'iP064 31Jul2018/20180731_204939000_iOS'
-              ]
+# NEW_VIDEOS = ['iP057 07Jul2018/iP057 OD - 20180709_213052000_iOS', 'iP057 07Jul2018/iP057 OS - 20180709_213151000_iOS',
+#               'iP058 16Jul2018/iP058 OD, 120 ISO', 'iP058 16Jul2018/iP058 OS, 120 ISO',
+#               'iP059 16Jul2018/iP059 OD - 20180716_212537000_iOS', 'iP059 16Jul2018/iP059 OS - 20180716_212624000_iOS',
+#               'iP060 17Jul2018/iP060 OD - 20180717_175526000_iOS', 'iP060 17Jul2018/iP060 OS - 20180717_175557000_iOS',
+#               # 'iP061 30Jul2018/20180730_204748000_iOS', 'iP061 30Jul2018/20180730_204824000_iOS',
+#               # 'iP062 30Jul2018/20180730_225453000_iOS', 'iP062 30Jul2018/20180730_225528000_iOS',
+#               # 'iP063 31Jul2018/20180731_185148000_iOS', 'iP063 31Jul2018/20180731_185231000_iOS',
+#               # 'iP064 31Jul2018/20180731_204901000_iOS', 'iP064 31Jul2018/20180731_204939000_iOS'
+#               ]
+#
+# NEW_VIDEOS_START_END_DICT = \
+#     {'iP057 07Jul2018/iP057 OD - 20180709_213052000_iOS':[10, 980],
+#      'iP057 07Jul2018/iP057 OS - 20180709_213151000_iOS':[10, 780],
+#      'iP058 16Jul2018/iP058 OD, 120 ISO':[100, 550], 'iP058 16Jul2018/iP058 OS, 120 ISO':[10, 740],
+#      'iP059 16Jul2018/iP059 OD - 20180716_212537000_iOS':[150, 680],
+#      'iP059 16Jul2018/iP059 OS - 20180716_212624000_iOS':[10, 450],
+#      'iP060 17Jul2018/iP060 OD - 20180717_175526000_iOS':[10, 550],
+#      'iP060 17Jul2018/iP060 OS - 20180717_175557000_iOS':[200, 950],
+#      'iP061 30Jul2018/iP061 OD - 20180730_204748000_iOS':[30, 575], 'iP061 30Jul2018/iP061 OS - 20180730_204824000_iOS':[10, 525]
+#      }
 
-NEW_VIDEOS_START_END_DICT = \
-    {'iP057 07Jul2018/iP057 OD - 20180709_213052000_iOS':[10, 980],
-     'iP057 07Jul2018/iP057 OS - 20180709_213151000_iOS':[10, 780],
-     'iP058 16Jul2018/iP058 OD, 120 ISO':[100, 550], 'iP058 16Jul2018/iP058 OS, 120 ISO':[10, 740],
-     'iP059 16Jul2018/iP059 OD - 20180716_212537000_iOS':[150, 680],
-     'iP059 16Jul2018/iP059 OS - 20180716_212624000_iOS':[10, 450],
-     'iP060 17Jul2018/iP060 OD - 20180717_175526000_iOS':[10, 550],
-     'iP060 17Jul2018/iP060 OS - 20180717_175557000_iOS':[200, 950],
-     'iP061 30Jul2018/20180730_204748000_iOS':[30, 575], 'iP061 30Jul2018/20180730_204824000_iOS':[10, 525]
-     }
+
+NEW_VIDEOS = [ 'iP061 30Jul2018/iP061 OD - 20180730_204748000_iOS', 'iP061 30Jul2018/iP061 OS - 20180730_204824000_iOS',
+              'iP062 30Jul2018/iP062 OD - 20180730_225453000_iOS', 'iP062 30Jul2018/iP062 OS - 20180730_225528000_iOS',
+              'iP063 31Jul2018/iP063 OD - 20180731_185148000_iOS', 'iP063 31Jul2018/iP063 OS - 20180731_185231000_iOS',
+              'iP064 31Jul2018/iP064 OD - 20180731_204901000_iOS', 'iP064 31Jul2018/iP064 OS - 20180731_204939000_iOS',
+              'iP065 02Aug2018/iP065 OD - 20180802_230044000_iOS', 'iP065 02Aug2018/iP065 OS - 20180802_230129000_iOS',
+              'iP066 03Aug2018/iP066 OD - 20180803_184434000_iOS', 'iP066 03Aug2018/iP066 OS - 20180803_184517000_iOS',
+              'iP067 03Aug2018/iP067 OD - 20180803_191121000_iOS', 'iP067 03Aug2018/iP067 OS - 20180803_191225000_iOS',
+              'iP068 06Aug2018/iP068 OD A - 20180806_232714000_iOS', 'iP068 06Aug2018/iP068 OS - 20180806_232856000_iOS',
+              'iP069 14Aug2018/iP069 OD - 20180814_212500000_iOS', 'iP069 14Aug2018/iP069 OS - 20180814_212537000_iOS',
+              'iP070 15Aug2018/iP070 OD - 20180815_173415000_iOS', 'iP070 15Aug2018/iP070 OS - 20180815_173502000_iOS']
+
+NEW_VIDEOS_START_END_DICT = {
+    'iP061 30Jul2018/iP061 OD - 20180730_204748000_iOS':[30, 575], 'iP061 30Jul2018/iP061 OS - 20180730_204824000_iOS':[10, 525],
+    'iP062 30Jul2018/iP062 OD - 20180730_225453000_iOS':[60, 700], 'iP062 30Jul2018/iP062 OS - 20180730_225528000_iOS':[130, 1000],
+    'iP063 31Jul2018/iP063 OD - 20180731_185148000_iOS':[125, 580], 'iP063 31Jul2018/iP063 OS - 20180731_185231000_iOS':[25, 480],
+    'iP064 31Jul2018/iP064 OD - 20180731_204901000_iOS':[75, 625], 'iP064 31Jul2018/iP064 OS - 20180731_204939000_iOS':[25, 650],
+    'iP065 02Aug2018/iP065 OD - 20180802_230044000_iOS':[25, 660], 'iP065 02Aug2018/iP065 OS - 20180802_230129000_iOS':[25, 460],
+    'iP066 03Aug2018/iP066 OD - 20180803_184434000_iOS':[25, 660], 'iP066 03Aug2018/iP066 OS - 20180803_184517000_iOS':[25, 625],
+    'iP067 03Aug2018/iP067 OD - 20180803_191121000_iOS':[25, 625], 'iP067 03Aug2018/iP067 OS - 20180803_191225000_iOS':[250, 750],
+    'iP068 06Aug2018/iP068 OD A - 20180806_232714000_iOS':[25, 250], 'iP068 06Aug2018/iP068 OS - 20180806_232856000_iOS':[25, 600],
+    'iP069 14Aug2018/iP069 OD - 20180814_212500000_iOS':[25, 625], 'iP069 14Aug2018/iP069 OS - 20180814_212537000_iOS':[25, 660],
+    'iP070 15Aug2018/iP070 OD - 20180815_173415000_iOS':[25, 800], 'iP070 15Aug2018/iP070 OS - 20180815_173502000_iOS':[40, 950],
+}
+
+NEW_VIDEOS_TEST = ['iP058 16Jul2018/iP058 OD, 120 ISO', 'iP058 16Jul2018/iP058 OS, 120 ISO',
+                   'iP061 30Jul2018/iP061 OD - 20180730_204748000_iOS', 'iP061 30Jul2018/iP061 OS - 20180730_204824000_iOS',
+                   'iP062 30Jul2018/iP062 OD - 20180730_225453000_iOS', 'iP065 02Aug2018/iP065 OS - 20180802_230129000_iOS',
+                   'iP066 03Aug2018/iP066 OS - 20180803_184517000_iOS', 'iP069 14Aug2018/iP069 OD - 20180814_212500000_iOS',
+                   'iP071 06Sep2018/iP071 OD - 20180906_225308000_iOS', 'iP071 06Sep2018/iP071 OS - 20180906_225345000_iOS']
 
 
 def segment_frames(frame_dir, num_clusters=4, lens_size_lim=[RADIUS_LENS_LOWER, RADIUS_LENS_UPPER], inner_size_lim=[RADIUS_INNER_LOWER, RADIUS_INNER_UPPER]):
     fnames = [x for x in os.listdir(os.path.join(prefix, frame_dir)) if '.png' in x]
-    frames = []
-    for fname in fnames:
-        frame = cv2.imread(os.path.join(prefix, frame_dir, fname))
-        frames.append(frame)
 
     # save locations
     outfile = 'kmeans_preds.txt'
     save_folder = '{}_k{}_pred'.format(frame_dir, num_clusters)
     if not os.path.isdir(os.path.join(prefix, save_folder)):
         os.makedirs(os.path.join(prefix, save_folder))
+    if not os.path.isdir(os.path.join(prefix, save_folder, 'kmeans')):
         os.makedirs(os.path.join(prefix, save_folder, 'kmeans'))
+    if not os.path.isdir(os.path.join(prefix, save_folder, 'all_circles')):
         os.makedirs(os.path.join(prefix, save_folder, 'all_circles'))
 
     # visualise missed circles
     for idx, fname in enumerate(fnames):
         orig_name = fname
-        orig_img = frames[idx]
+        save_path = os.path.join(prefix, save_folder, orig_name)
+        text_path = os.path.join(prefix, save_folder, outfile)
+        if os.path.isfile(save_path):
+            continue    # already processed
+        # orig_img = frames[idx]
+        orig_img = cv2.imread(os.path.join(prefix, frame_dir, fname))
 
         # now try playing with kmeans different conditions
         # k4, different channels, visualise all circles, ellipse, k5
@@ -1973,11 +2610,9 @@ def segment_frames(frame_dir, num_clusters=4, lens_size_lim=[RADIUS_LENS_LOWER, 
             = find_circles(target_img, num_clusters=num_clusters, get_all=True, lens_size_lim=lens_size_lim, inner_size_lim=inner_size_lim, visualise=False)
 
         # store images
-        visualise_kmeans(target_img, clt)
-        plt.figure(10)
+        plt = visualise_kmeans(target_img, clt)
+        # plt.figure(10)
         plt.savefig(os.path.join(prefix, save_folder, 'kmeans', orig_name))
-        save_path = os.path.join(prefix, save_folder, orig_name)
-        text_path = os.path.join(prefix, save_folder, outfile)
         save_circles(save_path, text_path, orig_name, orig_img, found_lens_circle, lens_circle, inner_circle,
                      found_inner_circle)
         visualise_circle(orig_img, lens_circle, all_circles)  # all circles
@@ -1994,6 +2629,7 @@ def segment_frames(frame_dir, num_clusters=4, lens_size_lim=[RADIUS_LENS_LOWER, 
     return
 
 
+# simpler to run: for file in iP058_OS,_*.png; do mv "$file" "${file/iP058_OS,_/iP058_OS_}"; done
 def fix_img_names(folder='new_video_frames_k5_pred'):
     img_names = [x for x in os.listdir(os.path.join(prefix, folder)) if '.png' in x]
     for idx, img_name in enumerate(img_names):
@@ -2006,20 +2642,30 @@ def fix_img_names(folder='new_video_frames_k5_pred'):
 
 # to take advantage of visualise_iop_from_json
 def make_json_from_preds_txt(folder, txt_file, sep=','):
-    circle_dict = {}  # {frame:{'lens_data':[], 'inner_data':[]}}
-    with open(os.path.join(prefix, folder, txt_file), 'r') as fin:
-        for l in fin.readlines():
-            l_toks = l.rstrip().split(sep)
-            video_name, frame_num, l_x, l_y, l_r, inner_x, inner_y, inner_r, found_lens, found_inner = l_toks
-            key = make_frame_key(video_name, frame_num)
-            circle_dict[key] = {'inner_data':[int(inner_x), int(inner_y), int(inner_r)], 'inner_found':found_inner,
-                                'lens_data':[int(l_x), int(l_y), int(l_r)], 'lens_found':found_lens}
-    fin.close()
+    circle_dict = get_circle_dict_from_preds_txt(folder, txt_file, sep=sep)
     save_path = os.path.join(prefix, folder, 'pred_circles.json')
     with open(save_path, 'w') as fout:
         json.dump(circle_dict, fout)
     fout.close()
     return circle_dict, save_path   # {video_name_frame_num:{inner:[], lens":coords}}
+
+
+def get_circle_dict_from_preds_txt(folder, txt_file, sep=','):
+    circle_dict = {}  # {frame:{'lens_data':[], 'inner_data':[]}}
+    video_names_dict = {}  # keeps count of frames processed in each video
+    with open(os.path.join(prefix, folder, txt_file), 'r') as fin:
+        for l in fin.readlines():
+            l_toks = l.rstrip().split(sep)
+            video_name, frame_num, l_x, l_y, l_r, inner_x, inner_y, inner_r, found_lens, found_inner = l_toks
+            key = make_frame_key(video_name, frame_num)
+            circle_dict[key] = {'inner_data': [int(inner_x), int(inner_y), int(inner_r)], 'inner_found': found_inner,
+                                'lens_data': [int(l_x), int(l_y), int(l_r)], 'lens_found': found_lens}
+            if video_name not in video_names_dict:
+                video_names_dict[video_name] = 1
+            else:
+                video_names_dict[video_name] = video_names_dict[video_name] + 1
+    fin.close()
+    return circle_dict
 
 
 # see if we can pulse from inner lens
@@ -2174,7 +2820,329 @@ def make_movie2(folder, txt_file, img_folder, sep=','):
     return circle_dict
 
 
+## aaron's green range circles
+def get_green_circles(green_folder=os.path.join(prefix, 'ayl-color', 'greens'), img_folder=os.path.join(prefix, 'new_video_frames'),
+                      pred_folder='new_video_frames_k5_pred/fixed', visualise=False):
+    inner_out = 'green_inner_preds.txt'
+    all_green_circles = 'all_green_circles.csv'
+    outfile = 'kmeans_green_preds.txt'
+    save_folder = os.path.join(prefix, pred_folder, 'green')
+    if not os.path.isdir(save_folder):
+        os.makedirs(save_folder)
+
+    # relate previous predictions to new predictions and visualise and store properly
+    pred_file = os.path.join(prefix, pred_folder, 'pred_circles.json')
+    if os.path.isfile(pred_file):
+        fin = open(pred_file).read()
+        pred_dict = json.loads(fin)
+    else:
+        pred_dict = {}
+
+    img_names = [x for x in sorted(os.listdir(green_folder)) if '.png' in x]
+    for img_name in img_names:
+        temp = cv2.imread(os.path.join(green_folder, img_name), cv2.IMREAD_GRAYSCALE)
+        inner_circle, circles = find_greyscale_circles_donut(temp)
+        found_inner_circle = True if inner_circle!=DEFAULT_CIRCLE else False
+
+        # always write inner circle file
+        short_name = img_name.replace('.png', '')
+        with open(os.path.join(save_folder, inner_out), 'a') as fout:
+            vals = [short_name] + [str(x) for x in inner_circle] + [str(found_inner_circle)]
+            fout.write('{}\n'.format(','.join(vals)))
+        fout.close()
+
+        # write all circles for debugging purposes
+        with open(os.path.join(save_folder, all_green_circles), 'a') as fout:
+            for c in circles:
+                vals = [short_name] + [str(x) for x in c]
+                fout.write('{}\n'.format(','.join(vals)))
+        fout.close()
+
+        if short_name in pred_dict:
+            kmeans_data = pred_dict[short_name]
+            lens_circle = kmeans_data['lens_data']
+            found_lens_circle = kmeans_data['lens_found']
+
+            raw_img = cv2.imread(os.path.join(img_folder, img_name))
+            if visualise:
+                visualise_circle(raw_img, lens_circle, [lens_circle, inner_circle])
+            save_path = os.path.join(save_folder, img_name)
+            text_path = os.path.join(save_folder, outfile)
+            save_circles(save_path, text_path, img_name, raw_img, found_lens_circle, lens_circle, inner_circle,
+                         found_inner_circle)
+        else:
+            raw_img = cv2.imread(os.path.join(img_folder, img_name))
+            save_path = os.path.join(save_folder, img_name)
+            text_path = os.path.join(save_folder, outfile)
+            save_circles(save_path, text_path, img_name, raw_img, False, inner_circle, inner_circle,
+                         found_inner_circle)
+    return
+
+
+def find_greyscale_circles(img, min_area=MIN_AREA_INNER, max_area=MAX_AREA_INNER, visualise=False):
+    if max_area is None:
+        max_area = np.prod(img.shape) / 2
+    max_ind = -1
+
+    # get contours for mask
+    img_cp = np.copy(img)
+    im2, contours, hierarchy = cv2.findContours(img, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+    show_all_contours = False
+    all_areas = []
+    for idx, cnt in enumerate(contours):    # iterate to find contour areas
+        area = cv2.contourArea(cnt)
+        all_areas.append(area)
+
+        if visualise and show_all_contours:
+            perimeter = cv2.arcLength(cnt, True)
+            x, y, w, h = cv2.boundingRect(cnt)
+            cv2.rectangle(img_cp, (x, y), (x + w, y + h), (255, 0, 0), 2)
+            plt.imshow(img_cp)
+
+    # find all legit contours by area
+    all_areas = np.array(all_areas)
+    legit_area_idx = np.nonzero(np.logical_and(all_areas>min_area,  all_areas<max_area))[0]
+    legit_contours = [contours[x] for x in legit_area_idx]
+    legit_areas = all_areas[legit_area_idx]
+
+    circles = []
+    for cnt in legit_contours:
+        (x, y), radius = cv2.minEnclosingCircle(cnt)
+        c = [int(x), int(y), int(radius)]
+        circles.append(c)
+
+    found_inner_circle = False
+    donut_outer = False
+    donut_inner = False
+    inner_circle = DEFAULT_CIRCLE
+    sorted_circles = sorted(circles, key=lambda c: c[2])
+    sorted_circles.reverse()
+    for c in sorted_circles:
+        local_found_inner_circle = is_approp_size(img, c, size_lim=[RADIUS_INNER_LOWER_NEW, RADIUS_INNER_UPPER_NEW])
+        if local_found_inner_circle:
+            donut_outer = True  # found outer
+            # found_inner_circle = found_inner_circle or local_found_inner_circle
+            if inner_circle!= DEFAULT_CIRCLE:  # not default
+                r = c[2]
+                R = inner_circle[2]
+                if r<R:     # only if enclosed - this would work if first inner (1st kmeans cluster) is representative
+                    d = np.linalg.norm(np.array(inner_circle[:2]) - np.array(c[:2]))
+                    overlap_area = intersection_area(d, R, r)
+                    if overlap_area/area_circle(c)>.9:  # overlap area more than x of smaller circle!
+                        inner_circle = c    # smaller circle
+                        donut_inner = True
+            else:
+                inner_circle = c
+            found_inner_circle = donut_outer and donut_inner
+
+    if visualise:
+        visualise_circle(cv2.cvtColor(img, cv2.COLOR_GRAY2BGR), inner_circle, circles, circle_color=(255, 0, 0))
+        # visualise_circle(img, inner_circle, circle_color=(255, 0, 0))
+    return inner_circle, circles
+
+
+# enforce donut or nothing
+def find_greyscale_circles_donut(img, min_area=MIN_AREA_INNER, max_area=MAX_AREA_INNER, visualise=False):
+    if max_area is None:
+        max_area = np.prod(img.shape) / 2
+    max_ind = -1
+
+    # get contours for mask
+    img_cp = np.copy(img)
+    im2, contours, hierarchy = cv2.findContours(img, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+    show_all_contours = False
+    all_areas = []
+    for idx, cnt in enumerate(contours):    # iterate to find contour areas
+        area = cv2.contourArea(cnt)
+        all_areas.append(area)
+
+        if visualise and show_all_contours:
+            perimeter = cv2.arcLength(cnt, True)
+            x, y, w, h = cv2.boundingRect(cnt)
+            cv2.rectangle(img_cp, (x, y), (x + w, y + h), (255, 0, 0), 2)
+            plt.imshow(img_cp)
+
+    # find all legit contours by area
+    all_areas = np.array(all_areas)
+    legit_area_idx = np.nonzero(np.logical_and(all_areas>min_area,  all_areas<max_area))[0]
+    legit_contours = [contours[x] for x in legit_area_idx]
+    legit_areas = all_areas[legit_area_idx]
+
+    circles = []
+    for cnt in legit_contours:
+        (x, y), radius = cv2.minEnclosingCircle(cnt)
+        c = [int(x), int(y), int(radius)]
+        # approp_circle = is_approp_size(img, c, size_lim=[RADIUS_INNER_LOWER_NEW, RADIUS_INNER_UPPER_NEW])
+        approp_circle = is_approp_size(img, c, size_lim=[RADIUS_INNER_LOWER_NEW, RADIUS_LENS_LOWER+20])  # can be wrapped in outer lens
+        if approp_circle and is_circle_central(c):
+            circles.append(c)
+
+    donut_outer, donut_inner = find_donut_circles(circles, min_radius=RADIUS_INNER_LOWER)
+    # found_inner_circle = donut_outer!=DEFAULT_CIRCLE and donut_inner!=DEFAULT_CIRCLE
+    # inner_circle, found_inner_circle = manometry_circle_hack(img, donut_inner, circles, inner_size_lim=[RADIUS_INNER_LOWER, RADIUS_INNER_UPPER])
+
+    if visualise:
+        visualise_circle(cv2.cvtColor(img, cv2.COLOR_GRAY2BGR), donut_inner, circles, circle_color=(255, 0, 0))
+    return donut_inner, circles
+
+
+def manometry_circle_hack(raw_img, inner_circle, circles, inner_size_lim=[RADIUS_INNER_LOWER, RADIUS_INNER_UPPER]):
+    if inner_circle == DEFAULT_CIRCLE:  # manometry videos are fucked - because of needle
+        found_inner_circle = False
+        sorted_circles = sorted(circles, key=lambda x:x[2], reverse=True)
+        for c in sorted_circles:    # grab largest circle if any found from find_greyscale_circles_donut
+            if not found_inner_circle:
+                if is_approp_size(raw_img, c, size_lim=inner_size_lim) and is_circle_central(c):
+                    inner_circle = c
+                    found_inner_circle = True
+    found_inner_circle = True if inner_circle != DEFAULT_CIRCLE else False
+    return inner_circle, found_inner_circle
+
+
+def find_donut_circles(circles, overlap_ratio=.9, min_radius=RADIUS_LENS_LOWER, return_default=True, early_stop=False):
+    sorted_circles = sorted(circles, key=lambda c: c[2], reverse=True)  # descending is better?!
+    if return_default:
+        donut_outer = DEFAULT_CIRCLE
+        donut_inner = DEFAULT_CIRCLE
+    else:   # return smallest and largest
+        # print('in find_donut_circles', len(sorted_circles))
+        if len(sorted_circles)>0:
+            donut_outer = sorted_circles[0]
+            donut_inner = sorted_circles[-1]
+        else:
+            donut_outer = DEFAULT_CIRCLE
+            donut_inner = DEFAULT_CIRCLE
+
+    # found_donut = False
+    for idx in range(len(sorted_circles)):  # keeps iterating until it finds smallest donut
+        cur_outer = sorted_circles[idx]
+        for jdx in range(idx + 1, len(sorted_circles)):
+            cur_inner = sorted_circles[jdx]
+            r = cur_inner[2]
+            R = cur_outer[2]
+
+            if r < min_radius: continue
+            d = np.linalg.norm(np.array(cur_inner[:2]) - np.array(cur_outer[:2]))
+            overlap_area = intersection_area(d, R, r)
+            inner_area = area_circle(cur_inner)
+            outer_area = area_circle(cur_outer)
+            if (overlap_area/inner_area > overlap_ratio):  #and (overlap_area/outer_area>overlap_ratio):  # overlap area more than x of smaller circle!
+                donut_inner = cur_inner
+                donut_outer = cur_outer
+                # found_donut = True
+                if early_stop:
+                    return donut_outer, donut_inner
+    return donut_outer, donut_inner
+
+
+def find_inner_donut(circles, donut_outer, overlap_ratio=.9):
+    R = donut_outer[2]
+
+    sorted_circles = sorted(circles, key=lambda c: c[2])
+    sorted_circles.reverse()  # descending is better!
+    donut_inner = DEFAULT_CIRCLE
+
+    for c in sorted_circles:  # keeps iterating until it finds smallest donut
+        r = c[2]
+        if r > R or r<RADIUS_INNER_LOWER:
+            continue
+        d = np.linalg.norm(np.array(c[:2]) - np.array(donut_outer[:2]))
+        overlap_area = intersection_area(d, R, r)
+        if overlap_area / area_circle(c) >= overlap_ratio:  # overlap area more than x of smaller circle!
+            donut_inner = c
+    return donut_inner
+
+
+def second_largest(numbers):
+    count = 0
+    m1 = m2 = float('-inf')
+    for x in numbers:
+        count += 1
+        if x > m2:
+            if x >= m1:
+                m1, m2 = x, m1
+            else:
+                m2 = x
+    return m2 if count >= 2 else None
+
+
+def get_measured_iops(iop_file='IOPs_new.csv', num_header=1):
+    measured_dict = {}
+    with open(os.path.join(prefix, iop_file), 'r') as fin:
+        counter = 0
+        for l in fin.readlines():
+            counter+=1
+            if counter<num_header+1:   # skip header
+                continue
+            l_toks = l.rstrip().split(',')
+            patient_id = l_toks[0]
+            field_names = ['goldman_OD', 'goldman_group_OD', 'goldman_OS', 'goldman_group_OS', 'tonopen_pre_OD',
+                           'tonopen_supine_OD', 'tonopen_pre_OS', 'tonopen_supine_OS', 'iCare_pre_OD', 'iCare_pre_OS',
+                           'iCare_post_OD', 'iCare_post_OS', 'pneumo_supine_OD', 'DI_supine_OD', 'opa_supine_OD',
+                           'pneumo_supine_OS', 'DI_supine_OS', 'opa_supine_OS', 'pneumo_upright_OD', 'DI_upright_OD',
+                           'opa_upright_OD', 'pneumo_upright_OS', 'DI_upright_OS', 'opa_upright_OS']
+            numeric_vals = [get_numeric_val(x) for x in l_toks[1:]]
+            patient_data = dict(zip(field_names, numeric_vals))
+
+            for eye_type in ['OD', 'OS']:
+                key = '{}_{}'.format(patient_id, eye_type)
+                measured_dict[key] = {}     # init
+                for field_name in field_names:
+                    if eye_type in field_name:
+                        short_field_name = field_name.replace('_{}'.format(eye_type), '')
+                        measured_dict[key][short_field_name] = patient_data[field_name]
+    fin.close()
+    return measured_dict
+
+
+def get_numeric_val(str_val):
+    if is_number(str_val):
+        return float(str_val)
+    else:
+        return float('nan')
+
+
+def is_number(s):
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
+
+
+def bland_altman_plot(data1, data2, *args, **kwargs):
+    data1     = np.asarray(data1)
+    data2     = np.asarray(data2)
+    mean      = np.mean([data1, data2], axis=0)
+    diff      = data1 - data2                   # Difference between data1 and data2
+    md        = np.mean(diff)                   # Mean of the difference
+    sd        = np.std(diff, axis=0)            # Standard deviation of the difference
+
+    plt.scatter(mean, diff, *args, **kwargs)
+    plt.axhline(md,           color='gray', linestyle='--')
+    plt.axhline(md + 1.96*sd, color='gray', linestyle='--')
+    plt.axhline(md - 1.96*sd, color='gray', linestyle='--')
+    return
+
+
+def read_pachy(pachy_file=os.path.join(prefix, 'pachy_real.csv')):
+    pachy_dict = {}
+    with open(pachy_file, 'r') as fin:
+        lines = fin.readlines()
+        for l in lines[1:]:
+            l_toks = l.rstrip().split(',')
+            patient_id, age, pachy_OD, pachy_OS, gat_OD, gat_OS = l_toks
+            pachy_dict['{}_OS'.format(patient_id)] = [float(pachy_OS) if is_number(pachy_OS) else np.nan, float(gat_OS) if is_number(gat_OS) else np.nan]
+            pachy_dict['{}_OD'.format(patient_id)] = [float(pachy_OD) if is_number(pachy_OD) else np.nan, float(gat_OD) if is_number(gat_OD) else np.nan]
+    fin.close()
+    return pachy_dict
+
+
 if __name__ == '__main__':
+    # measured_dict = get_measured_iops()
+
     # make_iop_chart()
     # make_iop_chart(do_halberg=False)
 
@@ -2218,7 +3186,9 @@ if __name__ == '__main__':
     # # check new algos against manual
     # compare_vs_truth(comp_folders=['joanne_seg_debug_k4', 'joanne_seg_debug_k5'], seg_data=seg_data, seg_names=fnames)
 
-    # extract_frames(video_names=NEW_VIDEOS, outdir='new_video_frames', start_end_dict=NEW_VIDEOS_START_END_DICT, avg_skip=2)
+    # extract_frames(video_names=NEW_VIDEOS, outdir='new_video_frames2', start_end_dict=NEW_VIDEOS_START_END_DICT, avg_skip=2)
+    # extract_frames(video_names=NEW_VIDEOS_TEST, outdir='video_frames_test', start_end_dict={}, avg_skip=1)
+    # sys.exit()
     # segment_frames(frame_dir='new_video_frames', num_clusters=4)
     # # RADIUS_INNER_LOWER = 150
     # # RADIUS_INNER_UPPER = 330
@@ -2228,7 +3198,7 @@ if __name__ == '__main__':
     # # RADIUS_INNER_UPPER_NEW = 280
     # # RADIUS_LENS_LOWER_NEW = 300
     # # RADIUS_LENS_UPPER_NEW = 480
-    # segment_frames(frame_dir='new_video_frames', num_clusters=5, lens_size_lim=[RADIUS_LENS_LOWER_NEW, RADIUS_LENS_UPPER_NEW], inner_size_lim=[RADIUS_INNER_LOWER_NEW, RADIUS_INNER_UPPER_NEW ])
+    # segment_frames(frame_dir='new_video_frames', num_clusters=5, lens_size_lim=[RADIUS_LENS_LOWER_NEW, RADIUS_LENS_UPPER_NEW], inner_size_lim=[RADIUS_INNER_LOWER_NEW, RADIUS_INNER_UPPER_NEW])
 
     # # fix commas in img names
     # fix_img_names('new_video_frames')
@@ -2247,17 +3217,91 @@ if __name__ == '__main__':
     # circle_dict, json_path = make_json_from_preds_txt(folder=test_folder, txt_file='kmeans_preds.txt')
     # video_dict =visualise_iop_from_json(folder=test_folder, json_path=json_path)
 
-    test_folder = 'new_video_frames_k5_pred/fixed'
-    circle_dict, json_path = make_json_from_preds_txt(folder=test_folder, txt_file='kmean_preds_new_size_lim.txt')
-    # make_movie2(test_folder, txt_file='kmean_preds_new_size_lim.txt', img_folder=os.path.join(prefix, 'new_video_frames'))
-    # make_movie(os.path.join(prefix, test_folder, 'movie_imgs', 'iP060_OD'))
-    # make_movie(os.path.join(prefix, test_folder, 'movie_imgs', 'iP057_OS'))
-    video_dict = visualise_iop_from_json(folder=test_folder, json_path=json_path)
-    fit_pulse(video_dict, test_folder)
+    # test_folder = 'new_video_frames_k5_pred/fixed'
+    # circle_dict, json_path = make_json_from_preds_txt(folder=test_folder, txt_file='kmean_preds_new_size_lim.txt')
+    # # make_movie2(test_folder, txt_file='kmean_preds_new_size_lim.txt', img_folder=os.path.join(prefix, 'new_video_frames'))
+    # # make_movie(os.path.join(prefix, test_folder, 'movie_imgs', 'iP060_OD'))
+    # # make_movie(os.path.join(prefix, test_folder, 'movie_imgs', 'iP057_OS'))
+    # video_dict = visualise_iop_from_json(folder=test_folder, json_path=json_path)
+    # fit_pulse(video_dict, test_folder)
+    #
+    # # temp = cv2.imread(os.path.join(prefix, test_folder, 'iP060_OS_frame902.png'))
+    # # temp2 = cv2.imread(os.path.join(prefix, test_folder, 'iP060_OS_frame902.png'), cv2.IMREAD_GRAYSCALE)
+    # # plt.figure(1)
+    # # plt.imshow(temp)
+    # # plt.figure(2)
+    # # plt.imshow(temp2)
 
-    # temp = cv2.imread(os.path.join(prefix, test_folder, 'iP060_OS_frame902.png'))
-    # temp2 = cv2.imread(os.path.join(prefix, test_folder, 'iP060_OS_frame902.png'), cv2.IMREAD_GRAYSCALE)
-    # plt.figure(1)
-    # plt.imshow(temp)
-    # plt.figure(2)
-    # plt.imshow(temp2)
+    # # # find aaron's green mask inner circles - this now does donuts with find_greyscale_circles_donut
+    # get_green_circles(green_folder=os.path.join(prefix, 'ayl-color', 'greens'), img_folder=os.path.join(prefix, 'new_video_frames'),
+    #                   pred_folder='new_video_frames_k5_pred/fixed')
+    # get_green_circles(green_folder=os.path.join(prefix, 'ayl-color', 'greens2'), img_folder=os.path.join(prefix, 'new_video_frames2'),
+    #                   pred_folder='new_video_frames2_k5_pred')
+    # get_green_circles(green_folder=os.path.join(prefix, 'ayl-color', 'greens3'), img_folder=os.path.join(prefix, 'video_frames_test'), pred_folder='video_frames_test_k5_pred')
+    # sys.exit()
+
+    ## new_videos_frames2
+    # segment_frames(frame_dir='new_video_frames2', num_clusters=5, lens_size_lim=[RADIUS_LENS_LOWER_NEW, RADIUS_LENS_UPPER_NEW], inner_size_lim=[RADIUS_INNER_LOWER_NEW, RADIUS_INNER_UPPER_NEW])
+    # segment_frames(frame_dir='video_frames_test', num_clusters=5, lens_size_lim=[RADIUS_LENS_LOWER_NEW, RADIUS_LENS_UPPER_NEW],
+    #                inner_size_lim=[RADIUS_INNER_LOWER_NEW, RADIUS_INNER_UPPER_NEW])
+
+    # # visualise all setups - outputs in respective ~/iop
+    # # test_folder = 'new_video_frames_k5_pred/'; txt_file = 'kmeans_preds.txt'    # wrong circle limits for lens and inner
+    # test_folder = 'new_video_frames_k5_pred/fixed_new'; txt_file = 'kmean_preds_new_size_lim.txt'   # too small inner for 60 OD or OS; forget which
+    # test_folder = 'new_video_frames_k5_pred/fixed_new2'; txt_file = 'kmean_preds_new_size_lim.txt'   # better lims
+    # # # kmeans lens + cv2.inRange inner (no donuts); doesnt matter fixed vs fixed_new vs fixed_new2 since only care about lens
+    # # test_folder = 'new_video_frames_k5_pred/fixed/green_no_donut'; txt_file = 'kmeans_green_preds.txt'
+    # test_folder = 'new_video_frames_k5_pred/fixed/green'; txt_file = 'kmeans_green_preds.txt'  # kmeans lens + cv2.inRange inner with donut
+    # all_circles_file = os.path.join(prefix, 'new_video_frames_k5_pred', 'all_circles.csv')
+    # for t_folder in ['new_video_frames_k5_pred/fixed/green']:
+    #     constrained_circles_dict \
+    #         = constrain_kmeans_circles(comp_folder=t_folder, circle_preds_file=txt_file,
+    #                                    all_circles_file=all_circles_file,  base_folder='new_video_frames', new_sizes=True)
+    #     test_folder = '{}/seq'.format(t_folder); txt_file = 'kmeans_preds_seq.txt'
+    #     # test_folder = t_folder
+    #     circle_dict, json_path = make_json_from_preds_txt(folder=test_folder, txt_file=txt_file)
+    #     video_dict = visualise_iop_from_json(folder=test_folder, json_path=json_path)
+    #
+    # # new_video_frames2
+    # test_folder = 'new_video_frames2_k5_pred/'; txt_file = 'kmeans_preds.txt'
+    # test_folder = 'new_video_frames2_k5_pred/green'; txt_file = 'kmeans_green_preds.txt'
+    # test_folder = 'new_video_frames2_k5_pred/green_no_donut'; txt_file = 'kmeans_green_preds.txt'
+    # all_circles_file = os.path.join(prefix, 'new_video_frames2_k5_pred', 'all_circles.csv')
+    # for idx, t_folder in enumerate(['new_video_frames2_k5_pred/', 'new_video_frames2_k5_pred/green']):
+    #     if 'green' in t_folder:
+    #         txt_file = 'kmeans_green_preds.txt'
+    #     else:
+    #         txt_file = 'kmeans_preds.txt'
+    #     constrained_circles_dict = \
+    #         constrain_kmeans_circles(comp_folder=t_folder, circle_preds_file=txt_file,
+    #                                  all_circles_file=all_circles_file, base_folder='new_video_frames2', new_sizes=True)
+    #     test_folder = '{}/seq'.format(t_folder); txt_file = 'kmeans_preds_seq.txt'
+    #     # test_folder = t_folder
+    #     circle_dict, json_path = make_json_from_preds_txt(folder=test_folder, txt_file=txt_file)
+    #     video_dict = visualise_iop_from_json(folder=test_folder, json_path=json_path)
+
+    # # video_frames_test
+    test_folder = 'video_frames_test_k5_pred/'; txt_file = 'kmeans_preds.txt'
+    test_folder = 'video_frames_test_k5_pred/green'; txt_file = 'kmeans_green_preds.txt'
+    all_circles_file = os.path.join(prefix, 'video_frames_test_k5_pred', 'all_circles.csv')
+    # for idx, t_folder in enumerate(['video_frames_test_k5_pred/green']):
+    for idx, t_folder in enumerate(['shu_videos_to_segment2']):
+        if 'green' in t_folder:
+            txt_file = 'kmeans_green_preds.txt'
+        else:
+            txt_file = 'kmeans_preds.txt'
+            # txt_file = 'kmeans_preds_might_not_have_finished.txt'
+        # constrained_circles_dict = \
+        #     constrain_kmeans_circles(comp_folder=t_folder, circle_preds_file=txt_file, all_circles_file=all_circles_file, base_folder='video_frames_test', new_sizes=True)
+        # test_folder = '{}/seq'.format(t_folder); txt_file = 'kmeans_preds_seq.txt'
+        test_folder = t_folder
+        circle_dict, json_path = make_json_from_preds_txt(folder=test_folder, txt_file=txt_file)
+        video_dict = visualise_iop_from_json(folder=test_folder, json_path=json_path)
+    # sys.exit()
+
+    # video_names = ['iP058_OD', 'iP058_OS', 'iP061_OD', 'iP061_OS', 'iP062_OD', 'iP065_OS', 'iP066_OS',
+    #                'iP069_OD', 'iP071_OD', 'iP071_OS']
+    # # make_movie(image_folder=os.path.join(prefix, 'video_frames_test_k5_pred'), video_names=['iP071_OS'])
+    # make_movie(image_folder=os.path.join(prefix, 'video_frames_test_k5_pred'), video_names=video_names)
+    # make_movie(image_folder=os.path.join(prefix, 'video_frames_test_k5_pred', 'green'), video_names=video_names)
+    # make_movie(image_folder=os.path.join(prefix, 'video_frames_test_k5_pred', 'seq'), video_names=video_names)
