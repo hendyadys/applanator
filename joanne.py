@@ -2009,6 +2009,84 @@ def visualise_iop_from_json(folder='joanne_seg_manual', json_path=os.path.join(p
     tono_sup_bias = np.nanmean(tono_sup2goldman)
     tono_sup_std = np.nanstd(tono_sup2goldman)
 
+    dl2pneuma_sup = iop_comp3[:, 3] - iop_comp3[:, 1]
+    dl2pneuma_bias = np.nanmean(dl2pneuma_sup)
+    dl2pneuma_std = np.nanstd(dl2pneuma_sup)
+
+    dl2tono_sup = iop_comp3[:, 3] - iop_comp3[:, 4]
+    dl2tono_bias = np.nanmean(dl2tono_sup)
+    dl2tono_std = np.nanstd(dl2tono_sup)
+
+    # only supine to each other
+    fsize=24
+    # # supine separately
+    # md, sd, params, pvals = bland_altman_plot(iop_comp3[:, 3], iop_comp3[:, 0], slope_adj=True)
+    # plt.ylabel("Smartphone - GAT (mmHg)")
+    # plt.xlabel("Average of Smartphone and GAT (mmHg)")
+    #
+    # non_nan_idx = np.nonzero(~np.isnan(iop_comp3[:, 4]))[0]
+    # md, sd, params, pvals = bland_altman_plot(iop_comp3[non_nan_idx, 4], iop_comp3[non_nan_idx, 0], slope_adj=True)
+    # plt.ylabel("Tonopen - GAT (mmHg)")
+    # plt.xlabel("Average of Tonopen and GAT (mmHg)")
+    #
+    # non_nan_idx = np.nonzero(~np.isnan(iop_comp3[:, 1]))[0]
+    # md, sd, params, pvals = bland_altman_plot(iop_comp3[non_nan_idx, 1], iop_comp3[non_nan_idx, 0], slope_adj=True)
+    # plt.ylabel("Pneumatonometer - GAT (mmHg)")
+    # plt.xlabel("Average of Pneumatonometer and GAT (mmHg)")
+
+    # supines vs each other
+    x_lim = [10, 35]
+    y_lim = [-15, 20]
+    non_nan_idx = np.nonzero(~np.isnan(iop_comp3[:, 1]))[0]
+    md, sd, params, pvals = bland_altman_plot(iop_comp3[non_nan_idx, 1], iop_comp3[non_nan_idx, 3], slope_adj=True)
+    plt.ylabel("Pneumatonometer - Smartphone (mmHg)")
+    plt.xlabel("Average of Pneumatonometer and Smartphone (mmHg)")
+    plt.ylim(y_lim)
+    plt.xlim(x_lim)
+    plt.text(x_lim[-1]-5, y_lim[1]-1, 'p-value={:0.2f}'.format(pvals[0]), fontsize=fsize)
+
+    non_nan_idx = np.nonzero(~np.isnan(iop_comp3[:, 4]))[0]
+    md, sd, params, pvals = bland_altman_plot(iop_comp3[non_nan_idx, 4], iop_comp3[non_nan_idx, 3], slope_adj=True)
+    plt.ylabel("Tonopen - Smartphone (mmHg)")
+    plt.xlabel("Average of Tonopen and Smartphone (mmHg)")
+    plt.ylim(y_lim)
+    plt.xlim(x_lim)
+    plt.text(x_lim[-1]-5, y_lim[1]-1, 'p-value={:0.2f}'.format(pvals[0]), fontsize=fsize)
+
+    non_nan_idx1 = np.nonzero(~np.isnan(iop_comp3[:, 4]))[0]
+    non_nan_idx2 = np.nonzero(~np.isnan(iop_comp3[:, 1]))[0]
+    non_nan_idx = list(set(non_nan_idx2).intersection(non_nan_idx1))
+    md, sd, params, pvals = bland_altman_plot(iop_comp3[non_nan_idx, 1], iop_comp3[non_nan_idx, 4], slope_adj=True)
+    plt.ylabel("Pneumatonometer - Tonopen (mmHg)")
+    plt.xlabel("Average of Pneumatonometer and Tonopen (mmHg)")
+    plt.ylim(y_lim)
+    plt.xlim(x_lim)
+    plt.text(x_lim[-1]-5, y_lim[1]-1, 'p-value={:0.2f}'.format(pvals[0]), fontsize=fsize)
+
+    # add jitter
+    plt.figure(1003);
+    plt.clf()
+    plt.rc('hatch', color='black', linewidth=5)
+    ax = plt.axes()
+    plt.plot(iop_comp3[:, 3], dl2pneuma_sup + np.random.rand(dl2pneuma_sup.size) * 0.1, 'bX', markersize=18, label='Smartphone - Pneumo-Supine')
+    plt.plot(iop_comp3[:, 3], dl2tono_sup + np.random.rand(dl2tono_sup.size) * 0.1, 'ro', markersize=18, label='Smartphone - Tonopen-Supine')
+    plt.tick_params(labelsize=fsize)
+    # add bias lines
+    x_lim = ax.get_xlim()
+    ci_x_range = np.linspace(x_lim[0], x_lim[-1], 1000)
+    plt.axhline(dl2pneuma_bias, color='blue', linestyle='--', linewidth=3)
+    plt.text(10, dl2pneuma_bias + .2, 'bias={:0.2f}'.format(dl2pneuma_bias), fontsize=fsize)
+    ax.fill_between(ci_x_range, np.repeat(dl2pneuma_bias + 1.96 * dl2pneuma_std, 1000),
+                    np.repeat(dl2pneuma_bias - 1.96 * dl2pneuma_std, 1000), color="blue", edgecolor="black", alpha=.2)
+    plt.axhline(dl2tono_bias, color='red', linestyle='-.', linewidth=3)
+    plt.text(10, dl2tono_bias + .2, 'bias={:0.2f}'.format(dl2tono_bias), fontsize=fsize)
+    ax.fill_between(ci_x_range, np.repeat(dl2tono_bias + 1.96 * dl2tono_std, 1000),
+                    np.repeat(dl2tono_std - 1.96 * dl2tono_std, 1000), color="red", edgecolor="black", alpha=.2)
+    plt.xlim(x_lim)
+    plt.xlabel('Smartphone IOP (mmHg)', fontsize=fsize, fontweight='bold')
+    plt.ylabel('Smartphone - Other Supine Methods (mmHg)', fontsize=fsize, fontweight='bold')
+    plt.grid()
+
     # add jitter
     plt.figure(103); plt.clf()
     plt.rc('hatch', color='black', linewidth=5)
@@ -3112,7 +3190,7 @@ def is_number(s):
         return False
 
 
-def bland_altman_plot(data1, data2, *args, **kwargs):
+def bland_altman_plot(data1, data2, color='gray', slope_adj=False, *args, **kwargs):
     data1     = np.asarray(data1)
     data2     = np.asarray(data2)
     mean      = np.mean([data1, data2], axis=0)
@@ -3120,11 +3198,82 @@ def bland_altman_plot(data1, data2, *args, **kwargs):
     md        = np.mean(diff)                   # Mean of the difference
     sd        = np.std(diff, axis=0)            # Standard deviation of the difference
 
+    # proportional bias
+    # https://www.westerndataanalytics.com/blog/2019/3/3/checking-for-proportional-bias-using-the-bland-altman-method
+    import statsmodels.api as sm
+    mean_var = sm.add_constant(mean, prepend=False)
+    mod = sm.OLS(diff, mean_var)
+    res = mod.fit()
+    res.conf_int(alpha=0.05, cols=None)  # this is param 95%CI
+    print(res.summary())
+
+    # from statsmodels.sandbox.regression.predstd import wls_prediction_std
+    # prstd, iv_l, iv_u = wls_prediction_std(res) # this only generates CI for training points!
+    #
+    # from statsmodels.stats.outliers_influence import summary_table
+    # st, data, ss2 = summary_table(res, alpha=0.05)
+    #
+    # fittedvalues = data[:, 2]
+    # predict_mean_se = data[:, 3]
+    # predict_mean_ci_low, predict_mean_ci_upp = data[:, 4:6].T
+    # predict_ci_low, predict_ci_upp = data[:, 6:8].T
+    #
+    # # Check we got the right things
+    # print(np.max(np.abs(res.fittedvalues - fittedvalues)))
+    # print(np.max(np.abs(iv_l - predict_ci_low)))
+    # print(np.max(np.abs(iv_u - predict_ci_upp)))
+    #
+    # plt.figure(100)
+    # plt.clf()
+    # plt.plot(mean, diff, 'o')
+    # plt.plot(mean, fittedvalues, '-', lw=2)
+    # # plt.plot(mean, predict_ci_low, 'r--', lw=2)
+    # # plt.plot(mean, predict_ci_upp, 'r--', lw=2)
+    # plt.plot(mean, predict_mean_ci_low, 'r--', lw=2)
+    # plt.plot(mean, predict_mean_ci_upp, 'r--', lw=2)
+
+    plt.figure(1)
+    plt.clf()
+    fsize=24
+    plt.rcParams.update({'font.size': fsize, 'font.weight': 'bold'})
+
     plt.scatter(mean, diff, *args, **kwargs)
-    plt.axhline(md,           color='gray', linestyle='--')
-    plt.axhline(md + 1.96*sd, color='gray', linestyle='--')
-    plt.axhline(md - 1.96*sd, color='gray', linestyle='--')
-    return
+    ax = plt.axes()
+    plt.xlim([0, 35])   # same x-axis scale for easier comparison
+
+    if slope_adj:
+        x_lim = ax.get_xlim()
+        x_range = np.linspace(x_lim[0], x_lim[-1], 1000)
+        x_range_intercept = sm.add_constant(x_range, prepend=False)
+        predictions = res.get_prediction(x_range_intercept)
+        pred_summary = predictions.summary_frame(alpha=0.05)
+        pred_mean = predictions.predicted_mean
+        pred_int = predictions.conf_int(alpha=0.05)
+
+        plt.plot(x_range, pred_mean, color=color, linestyle='-') # solid for mean bias
+        plt.plot(x_range, pred_int[:,0], color=color, linestyle='--')
+        plt.plot(x_range, pred_int[:,1], color=color, linestyle='--')
+        plt.text(0, md +.2, 'bias={:0.2f}'.format(md), fontsize=fsize)
+
+        pred_int2 = pred_summary.values[:, 4:]
+        plt.figure(2)
+        plt.clf()
+        plt.scatter(mean, diff, *args, **kwargs)
+        ax = plt.axes()
+        plt.xlim([0, 35])  # same x-axis scale for easier comparison
+        plt.plot(x_range, pred_mean, color=color, linestyle='-')  # solid for mean bias
+        plt.plot(x_range, pred_int2[:, 0], color=color, linestyle='--')
+        plt.plot(x_range, pred_int2[:, 1], color=color, linestyle='--')
+        plt.text(0, md + .2, 'bias={:0.2f}'.format(md), fontsize=fsize)
+    else:
+        plt.axhline(md,           color=color, linestyle='--')
+        plt.axhline(md + 1.96*sd, color=color, linestyle='--')
+        plt.axhline(md - 1.96*sd, color=color, linestyle='--')
+        plt.text(32, md +.2, 'bias={:0.2f}'.format(md), fontsize=fsize)
+        plt.text(32, md + 1.96*sd + .2, '97.5%={:0.2f}'.format(md+ 1.96*sd), fontsize=fsize)
+        plt.text(32, md - 1.96*sd + .2, '2.5%={:0.2f}'.format(md - 1.96*sd), fontsize=fsize)
+
+    return md, sd, res.params, res.pvalues
 
 
 def read_pachy(pachy_file=os.path.join(prefix, 'pachy_real.csv')):

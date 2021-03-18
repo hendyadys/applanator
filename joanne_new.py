@@ -553,7 +553,11 @@ def fit_curve_formula(deg=3, do_halberg=True):
 
 def make_pred_circles_for_manual(pred_circles_json_file=os.path.join(prefix, 'all_videos_seg', 'pred_circles_fixed.json'),
                                  video_folder=os.path.join(prefix, 'videos')):
-    manual_folder = os.path.join(prefix, 'all_videos_seg', 'manual_seg')
+    only_outer = True   # only do no inner ring frames
+    if only_outer:
+        manual_folder = os.path.join(prefix, 'all_videos_seg', 'manual_seg_outer_only')
+    else:
+        manual_folder = os.path.join(prefix, 'all_videos_seg', 'manual_seg')
     if not os.path.isdir(manual_folder):
         os.makedirs(manual_folder)
     seg_file = os.path.join(manual_folder, 'seg_file.csv')
@@ -573,33 +577,46 @@ def make_pred_circles_for_manual(pred_circles_json_file=os.path.join(prefix, 'al
     video_names = sorted(list(video_frames_dict.keys()))
     for video_name in video_names:
         video_frames = video_frames_dict[video_name]
-        # temp = list(Path(video_folder).glob('**/*{}*'.format(video_name.replace('_', ' '))))
-        # video_path = str(temp[0])
-        # frames, num_frames = get_video_frames(video_path)
+        temp = list(Path(video_folder).glob('**/*{}*'.format(video_name.replace('_', ' '))))    # finds video
+        video_path = str(temp[0])
+        frames, num_frames = get_video_frames(video_path)   # loads frames for video
 
+        video_frames_taken = []
         for idx, video_frame_name in enumerate(video_frames):
             frame_toks = video_frame_name.split('_')
             frame_num = int(frame_toks[2].replace('frame', '').replace('.png', ''))
 
-            # raw_img = frames[frame_num]
-            # raw_img = np.transpose(raw_img, (1, 0, 2))
+            raw_img = frames[frame_num]     # frame img
+            raw_img = np.transpose(raw_img, (1, 0, 2))  # rotate for usual view
             pred_data = pred_circle_dict[video_frame_name]
             lens_circle = pred_data['lens_data']
             inner_circle = pred_data['inner_data']
 
+            if (only_outer and inner_circle!=DEFAULT_CIRCLE):   # only outer then inner must be blank
+                continue
+            if (frame_num<num_frames*.1 or frame_num>num_frames*.9):   # only middle frames for blank inner frames
+                continue
+            if len(video_frames_taken)>25:  # when enough taken
+                continue
+            if np.any(np.abs(np.array(video_frames_taken) - frame_num) < 5):    # too close then ignore
+                continue
+
+            # save frame info, overlay circles on frame and save overlaid
+            video_frames_taken.append(frame_num)
             with open(seg_file, 'a') as fout:
                 vals = [video_frame_name] + list(lens_circle) + [''] +list(inner_circle) + ['']
                 fout.write('{}\n'.format(','.join([str(x) for x in vals])))
             fout.close()
-            # img_cp = raw_img.copy()
-            # cv2.circle(img_cp, (lens_circle[1], lens_circle[0]), lens_circle[2], (0, 0, 255), 2)  # overlay circle
-            # cv2.circle(img_cp, (inner_circle[1], inner_circle[0]), inner_circle[2], (255, 0, 255), 2)  # overlay circle
-            # cv2.imwrite(os.path.join(manual_folder, '{}.png'.format(video_frame_name)), img_cp)
+            img_cp = raw_img.copy()
+            cv2.circle(img_cp, (lens_circle[1], lens_circle[0]), lens_circle[2], (0, 0, 255), 2)  # overlay circle
+            cv2.circle(img_cp, (inner_circle[1], inner_circle[0]), inner_circle[2], (255, 0, 255), 2)  # overlay circle
+            cv2.imwrite(os.path.join(manual_folder, '{}.png'.format(video_frame_name)), img_cp)
     return
 
 
 if __name__ == '__main__':
     # make_pred_circles_for_manual(pred_circles_json_file=os.path.join(prefix, 'all_videos_seg', 'pred_circles_fixed.json'))
+    make_pred_circles_for_manual(pred_circles_json_file=os.path.join(prefix, 'all_videos_seg', 'pred_circles.json'))    # all circles
     # sys.exit()
     # visualise_iop_vs_radii_synthetic(lens_radius=425)
 
